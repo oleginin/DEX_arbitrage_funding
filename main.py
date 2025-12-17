@@ -1,14 +1,37 @@
-import argparse
+from DEX.backpack import BackpackEngine
+from DEX.paradex import ParadexEngine
+import time
 
-parser = argparse.ArgumentParser(description="This program prints recipes \
-consisting of the ingredients you provide.")
-parser.add_argument("-i1", "--ingredient_1")  # optional argument
-                                              # or
-parser.add_argument("ingredient_1")
-parser.add_argument("-i2", "--ingredient_2",
-                    choices=["pasta", "rice", "potato", "onion",
-                             "garlic", "carrot", "soy_sauce", "tomato_sauce"],
-                    help="You need to choose only one ingredient from the list.")
-# positional argument
 
-print(parser)
+def main():
+    bp = BackpackEngine()
+    pd = ParadexEngine()
+
+    # Встановлюємо правильні символи
+    symbol_bp = "SOL_USDC_PERP"
+    symbol_pd = "SOL-USD-PERP"
+
+    print(f"🔄 Моніторинг запущено...")
+
+    while True:
+        res_bp = bp.get_order_book(symbol_bp)
+        res_pd = pd.get_order_book(symbol_pd)
+
+        # Якщо є помилка — виводимо її детально
+        if res_bp.get('error') or res_pd.get('error'):
+            print(f"⚠️ Помилка мережі або символу:")
+            if res_bp.get('error'): print(f"   Backpack: {res_bp['error']}")
+            if res_pd.get('error'): print(f"   Paradex: {res_pd['error']}")
+        else:
+            # Розрахунок спреду (якщо дані є)
+            spread = ((res_pd['bid'] - res_bp['ask']) / res_bp['ask']) * 100
+
+            print(f"[{time.strftime('%H:%M:%S')}] "
+                  f"BP: {res_bp['ask']:.2f} | PD: {res_pd['bid']:.2f} | "
+                  f"Spread: {spread:.4f}%")
+
+        time.sleep(2)
+
+
+if __name__ == "__main__":
+    main()
