@@ -7,23 +7,39 @@ from paradex_py import ParadexSubkey
 
 class ParadexEngine:
     def __init__(self):
-        env_path = Path('data') / '.env'
+        # ВИПРАВЛЕННЯ: Динамічне визначення шляху до кореня проекту
+        # __file__ - це шлях до цього файлу (paradex.py)
+        # .parent - папка DEX
+        # .parent.parent - корінь проекту
+        root_dir = Path(__file__).resolve().parent.parent
+        env_path = root_dir / 'data' / '.env'
+
+        if not env_path.exists():
+            print(f"⚠️ Файл .env не знайдено за шляхом: {env_path}")
+
         load_dotenv(dotenv_path=env_path)
+
+        l2_key = os.getenv("PARADEX_SUBKEY")
+        l2_addr = os.getenv("PARADEX_ACCOUNT_ADDRESS")
+
+        if not l2_key:
+            # Це саме те місце, де виникала ваша помилка
+            raise ValueError(f"Ключ PARADEX_SUBKEY порожній. Перевірте файл: {env_path}")
 
         self.paradex = ParadexSubkey(
             env="prod",
-            l2_private_key=os.getenv("PARADEX_SUBKEY"),
-            l2_address=os.getenv("PARADEX_ACCOUNT_ADDRESS")
+            l2_private_key=l2_key,
+            l2_address=l2_addr
         )
 
-        # Ініціалізація акаунту зазвичай залишається асинхронною
+        # Ініціалізація акаунту (синхронна обгортка для асинхронного методу)
         try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(self.paradex.init_account())
-            print("✅ Paradex Engine успішно авторизовано")
-        except Exception as e:
-            print(f"⚠️ Помилка авторизації Paradex: {e}")
+
+        loop.run_until_complete(self.paradex.init_account())
 
     def get_market_data(self):
         """
