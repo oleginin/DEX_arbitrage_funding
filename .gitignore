@@ -1,4 +1,13 @@
+# IDE та атрибути
 .env
 data/.env
+.idea/
 .gitattributes
-.idea
+
+# Скрипти
+search.py
+test_funding.py
+
+# Python кеш (ігнорує у всіх папках проєкту)
+**/__pycache__/
+*.py[cod]
