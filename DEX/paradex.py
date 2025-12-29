@@ -42,21 +42,25 @@ class ParadexEngine:
         loop.run_until_complete(self.paradex.init_account())
 
     def get_market_data(self):
-        """
-        Синхронний виклик fetch_markets_summary.
-        """
+        """Отримуємо повну статистику (Summary) для всіх маркетів"""
         try:
-            # Викликаємо НАПРЯМУ, без loop.run_until_complete
+            # Правильна передача параметрів згідно з документацією
             res = self.paradex.api_client.fetch_markets_summary(params={'market': 'ALL'})
 
-            # Перевіряємо структуру відповіді
-            if isinstance(res, dict) and 'results' in res:
-                data = res['results']
-                return {item['symbol']: item for item in data}
-            return {}
+            # Результат за документацією - це словник з ключем 'results' (список)
+            results = res.get('results', []) if isinstance(res, dict) else res
+
+            # Повертаємо словник для зручного пошуку за назвою пари
+            return {item['symbol']: item for item in results}
         except Exception as e:
-            print(f"⚠️ Paradex Error (Market Data): {e}")
+            print(f"⚠️ Paradex Summary Error: {e}")
             return {}
+
+    def get_perp_symbols(self):
+        # Згідно з документацією, яку ти скинув
+        res = self.paradex.api_client.fetch_markets(params={'market': 'ALL'})
+        results = res.get('results', [])
+        return [m['symbol'] for m in results if '-PERP' in m['symbol']]
 
     def get_order_book(self, symbol):
         """Синхронне отримання стакана"""

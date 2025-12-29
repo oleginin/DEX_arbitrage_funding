@@ -1,91 +1,126 @@
 import time
-from datetime import datetime
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from DEX.backpack import BackpackEngine
 from DEX.paradex import ParadexEngine
 
-# Стилізація
-G, Y, C, B, R, X = "\033[92m", "\033[93m", "\033[96m", "\033[1m", "\033[91m", "\033[0m"
+# Кольори
+G, Y, B, R, X = "\033[92m", "\033[93m", "\033[1m", "\033[91m", "\033[0m"
 
 
 def run_monitor():
-    print(f"{B}{Y}🚀 МОНІТОРИНГ ЗАПУЩЕНО...{X}")
+    print(f"{B}{Y}🚀 МОНІТОРИНГ (ACCURATE FUNDING MODE){X}")
+    bp, pd = BackpackEngine(), ParadexEngine()
 
-    bp = BackpackEngine()
-    pd = ParadexEngine()
-
-    # 1. Початковий пошук спільних назв
     bp_list = bp.get_perp_symbols()
     pd_list = pd.get_perp_symbols()
+
     potential_pairs = []
-    for s in bp_list:
-        token = s.split('_')[0]
-        pd_name = f"{token}-USD-PERP"
-        if pd_name in pd_list:
-            potential_pairs.append({'base': token, 'bp': s, 'pd': pd_name})
+    for s_bp in bp_list:
+        token = s_bp.split('_')[0]
+        s_pd = f"{token}-USD-PERP"
+        if s_pd in pd_list:
+            potential_pairs.append({'base': token, 'bp': s_bp, 'pd': s_pd})
 
-    # 2. ЕТАП ВАЛІДАЦІЇ: Видаляємо ті, що не дають даних (наприклад, TRX)
-    print(f"{Y}🔍 Перевірка ліквідності та даних для {len(potential_pairs)} пар...{X}")
-
-    bp_sample = bp.get_all_market_data()
-    pd_sample = pd.get_market_data()
-
-    common_pairs = []
-    for p in potential_pairs:
-        f_bp = bp_sample.get(p['bp'], {}).get('fundingRate')
-        f_pd = pd_sample.get(p['pd'], {}).get('funding_rate')
-
-        # Якщо обидві біржі дали бодай якесь число (навіть 0), залишаємо
-        if f_bp is not None and f_pd is not None:
-            common_pairs.append(p)
-        else:
-            # Якщо даних немає (як у випадку з TRX), монета просто не потрапляє в список
-            pass
-
-    print(f"{G}✅ Список очищено. Працюємо з {len(common_pairs)} живими парами.{X}")
-    print("-" * 135)
+    print(f"🔍 Знайдено {len(potential_pairs)} пар. Сканування може зайняти час...")
+    print("-" * 155)
     print(
-        f"{B}{'Token':<8} | {'Напрямок':<18} | {'Spread %':<10} | {'F:BP 1h':<9} | {'F:PD 1h':<9} | {'Net Fund':<9} | {'Score 24h'}{X}")
-    print("-" * 135)
+        f"{B}{'TOKEN':<7} | {'STRATEGY (Best Route)':<25} | {'PRICE BUY':<10} | {'PRICE SELL':<10} | {'BP 1h %':<9} | {'PD 1h %':<9} | {'SPREAD':>7} | {'SCORE 24h':>9}{X}")
+    print("-" * 155)
 
-    # 3. ОСНОВНИЙ ЦИКЛ (тільки з робочими монетами)
     while True:
         try:
-            bp_all = bp.get_all_market_data()
+            # Оновлюємо дані Paradex (оптом)
             pd_all = pd.get_market_data()
+            if not pd_all:
+                time.sleep(1);
+                continue
 
-            for p in common_pairs:
-                # Дані точно є, бо ми перевірили їх вище
-                f_bp = float(bp_all[p['bp']]['fundingRate']) * 100
-                f_pd = (float(pd_all[p['pd']]['funding_rate']) * 100) / 4
+            for p in potential_pairs:
+                # --- PARADEX ---
+                pd_d = pd_all.get(p['pd'])
+                if not pd_d: continue
 
-                book_bp = bp.get_order_book(p['bp'])
-                book_pd = pd.get_order_book(p['pd'])
+                pd_bid = float(pd_d.get('bid', 0))
+                pd_ask = float(pd_d.get('ask', 0))
 
-                if not book_bp or not book_pd: continue
+                # Математика фандінгу Paradex: (8h rate / 8) * 100 = 1h %
+                raw_pd_8h = float(pd_d.get('funding_rate', 0))
+                f_pd_pct = (raw_pd_8h / 8) * 100
 
-                # Стратегія А: Buy BP / Sell PD
-                s_a = ((book_pd['bid'] - book_bp['ask']) / book_bp['ask']) * 100
-                f_a = f_pd - f_bp
-                score_a = s_a + (f_a * 24)
+                # --- BACKPACK ---
+                # 1. Фандінг (1h rate * 100 = 1h %)
+                raw_bp = bp.get_funding_rate(p['bp'])
+                f_bp_pct = raw_bp * 100
 
-                # Стратегія Б: Buy PD / Sell BP
-                s_b = ((book_bp['bid'] - book_pd['ask']) / book_pd['ask']) * 100
-                f_b = f_bp - f_pd
-                score_b = s_b + (f_b * 24)
+                # 2. Стакан (Точні ціни)
+                bp_depth = bp.get_depth(p['bp'])
+                if not bp_depth: continue
+                bp_bid, bp_ask = bp_depth['bid'], bp_depth['ask']
 
-                for spread, fund, score, direction in [(s_a, f_a, score_a, "L:BP ➔ S:PD"),
-                                                       (s_b, f_b, score_b, "L:PD ➔ S:BP")]:
-                    if score > 0.05:
-                        color, label = X, ""
-                        if spread > 0 and fund > 0:
-                            color, label = G + B, " 🔥 [IDEAL]"
-                        elif score > 0.4:
-                            color, label = C, " 💰 [BEST]"
+                if 0 in [bp_bid, bp_ask, pd_bid, pd_ask]: continue
 
-                        print(
-                            f"{color}{p['base']:<8} | {direction:<18} | {spread:>9.3f}% | {f_bp:>8.4f}% | {f_pd:>8.4f}% | {fund:>8.4f}% | {score:>8.3f}%{label}{X}")
+                # --- РОЗРАХУНОК ---
 
-            time.sleep(10)
+                # Варіант A: Long BP / Short PD
+                spread_a = ((pd_bid - bp_ask) / bp_ask) * 100
+                net_fund_a = f_pd_pct - f_bp_pct
+                score_a = spread_a + (net_fund_a * 24)
+
+                # Варіант B: Long PD / Short BP
+                spread_b = ((bp_bid - pd_ask) / pd_ask) * 100
+                net_fund_b = f_bp_pct - f_pd_pct
+                score_b = spread_b + (net_fund_b * 24)
+
+                # Вибір кращого
+                if score_a > score_b:
+                    direction_text = "Buy BP -> Sell PD"
+                    color_dir = f"{G}Buy BP{X} -> {R}Sell PD{X}"
+
+                    # ПРИСВОЮЄМО ПРАВИЛЬНІ ІМЕНА ЗМІННИМ
+                    price_in = bp_ask
+                    price_out = pd_bid
+
+                    final_spread = spread_a
+                    final_score = score_a
+                    is_ideal = spread_a > 0 and net_fund_a > 0
+                else:
+                    direction_text = "Buy PD -> Sell BP"
+                    color_dir = f"{G}Buy PD{X} -> {R}Sell BP{X}"
+
+                    # ПРИСВОЮЄМО ПРАВИЛЬНІ ІМЕНА ЗМІННИМ
+                    price_in = pd_ask
+                    price_out = bp_bid
+
+                    final_spread = spread_b
+                    final_score = score_b
+                    is_ideal = spread_b > 0 and net_fund_b > 0
+
+                # Фільтр виводу (наприклад, Score > -1.0%)
+                if final_score > -1.0:
+                    score_col = G if final_score > 0 else X
+                    fire = f"{Y}🔥{X}" if is_ideal else "  "
+
+                    # Вирівнювання тексту напрямку
+                    pad = " " * (25 - len(direction_text))
+                    formatted_dir = f"{color_dir}{pad}"
+
+                    # ВИВІД: ТУТ ТЕПЕР ВИКОРИСТОВУЄТЬСЯ price_in / price_out
+                    # Також стоїть .5f для цін (5 знаків), щоб бачити спред
+                    print(
+                        f"{p['base']:<7} | {formatted_dir} | {price_in:<10.5f} | {price_out:<10.5f} | {f_bp_pct:>8.5f}% | {f_pd_pct:>8.5f}% | {final_spread:>6.2f}% | {score_col}{final_score:>8.2f}%{X} {fire}")
+
+            time.sleep(120)
+
+        except KeyboardInterrupt:
+            break
         except Exception as e:
-            print(f"{R}⚠️ Помилка циклу: {e}{X}")
+            print(f"Error: {e}");
             time.sleep(5)
+
+
+if __name__ == "__main__":
+    run_monitor()
