@@ -89,6 +89,20 @@ class BackpackEngine:
         except:
             return None
 
+    def get_funding_rate(self, symbol):
+        """
+        Отримує ставку фінансування.
+        ЦЬОГО МЕТОДУ НЕ ВИСТАЧАЛО.
+        """
+        url = f"{self.base_url}/api/v1/fundingRates?symbol={symbol}&limit=1"
+        try:
+            res = requests.get(url, timeout=2).json()
+            if isinstance(res, list) and len(res) > 0:
+                return float(res[0].get('fundingRate', 0))
+            return 0.0
+        except:
+            return 0.0
+
     def get_account_balance(self):
         """
         Отримує баланси, виводить список активів > 0 та рахує загальний еквівалент USD.
@@ -103,7 +117,7 @@ class BackpackEngine:
                 data = res.json()
 
                 # --- ВІДОБРАЖЕННЯ ТА ПІДРАХУНОК ---
-
+                # print(f"\n💰 === БАЛАНС BACKPACK ===")
                 total_usd_value = 0.0
                 has_funds = False
 
@@ -116,11 +130,9 @@ class BackpackEngine:
                     # Показуємо тільки якщо є гроші
                     if total_coin > 0:
                         has_funds = True
-
+                        # print(f"   🔹 {asset}: {total_coin:.4f} (Вільні: {available:.4f} | У позиціях: {locked:.4f})")
 
                         # Рахуємо загальний баланс у доларах (тільки стейбли)
-                        # Якщо треба рахувати SOL в доларах, треба робити запит ціни,
-                        # але для швидкості тут сумуємо стейбли.
                         if asset in ["USDC", "USDT", "USD"]:
                             total_usd_value += total_coin
 
@@ -139,38 +151,29 @@ class BackpackEngine:
             print(f"⚠️ Balance Exception: {e}")
             return {}
 
-    # --- ПОЗИЦІЇ (ОНОВЛЕНО ПІД ДОКУМЕНТАЦІЮ) ---
+    # --- ПОЗИЦІЇ ---
 
     def get_positions(self):
-        """
-        Отримує позиції.
-        Endpoint: /api/v1/position (згідно вашої док)
-        Instruction: positionQuery
-        """
         instruction = "positionQuery"
         headers = self._get_headers(instruction)
-        url = f"{self.base_url}/api/v1/position"  # <-- ВИПРАВЛЕНО
+        url = f"{self.base_url}/api/v1/position"
 
         try:
             res = requests.get(url, headers=headers)
             if res.status_code == 200:
                 raw_data = res.json()
-                # НОРМАЛІЗАЦІЯ ДАНИХ
-                # Додаємо поле 'side' і 'liquidationPrice' для зручності
                 cleaned_positions = []
                 for p in raw_data:
                     net_qty = float(p.get('netQuantity', 0))
 
-                    if net_qty == 0: continue  # Пропускаємо пусті
+                    if net_qty == 0: continue
 
-                    # Визначаємо сторону по знаку
                     side = "Long" if net_qty > 0 else "Short"
 
-                    # Створюємо зручний об'єкт
                     cleaned_p = p.copy()
                     cleaned_p['side'] = side
-                    cleaned_p['netQuantity'] = str(abs(net_qty))  # Беремо модуль числа для ордерів
-                    cleaned_p['liquidationPrice'] = p.get('estLiquidationPrice', '0')  # Мапимо назву
+                    cleaned_p['netQuantity'] = str(abs(net_qty))
+                    cleaned_p['liquidationPrice'] = p.get('estLiquidationPrice', '0')
 
                     cleaned_positions.append(cleaned_p)
 
@@ -258,22 +261,19 @@ class BackpackEngine:
     # --- ЗАКРИТТЯ ПОЗИЦІЙ ---
 
     def close_position_market(self, symbol):
-        """Закриває всю позицію по ринку"""
         positions = self.get_positions()
         pos = next((p for p in positions if p['symbol'] == symbol), None)
         if not pos:
             print("⚠️ No position to close")
             return False
 
-        # side вже визначено в get_positions (Long/Short)
         close_side = "Sell" if pos['side'] == "Long" else "Buy"
-        qty = pos['netQuantity']  # Це вже модуль числа (позитивний)
+        qty = pos['netQuantity']
 
         print(f"📉 Closing {pos['side']} (Market): {close_side} {qty}")
         return self.place_market_order(symbol, close_side, qty)
 
     def close_position_limit(self, symbol, price):
-        """Закриває всю позицію ліміткою"""
         positions = self.get_positions()
         pos = next((p for p in positions if p['symbol'] == symbol), None)
         if not pos: return None
@@ -283,4 +283,3 @@ class BackpackEngine:
 
         print(f"🧱 Closing {pos['side']} (Limit): {close_side} {qty} @ {price}")
         return self.place_limit_order(symbol, close_side, price, qty)
-

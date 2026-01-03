@@ -1,80 +1,72 @@
 import sys
 import os
+import subprocess
 import time
+import io
 
-# Додаємо поточну директорію в шляхи пошуку
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# --- FIX WINDOWS ENCODING (ВИПРАВЛЕНО) ---
+# Ми примусово ставимо UTF-8 тільки для ВИВОДУ (print), щоб малювались таблиці і емодзі.
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
-# Імпортуємо функцію моніторингу
-from Scripts.monitor_spread_fund import run_monitor
+# ВАЖЛИВО: Ми ПРИБРАЛИ перекодування sys.stdin.
+# Це дозволить Windows використовувати стандартне кодування для вводу з клавіатури
+# і виправить помилку "0xff".
 
-# Кольори для меню
+# --- CONFIG ---
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPTS_DIR = os.path.join(ROOT_DIR, 'Scripts')
+
 G, Y, B, R, X = "\033[92m", "\033[93m", "\033[1m", "\033[91m", "\033[0m"
-C = "\033[96m"
-
-
-def clear_screen():
-    os.system('cls' if os.name == 'nt' else 'clear')
-
-
-def print_header():
-    print(f"{B}{C}╔══════════════════════════════════════════════════╗{X}")
-    print(f"{B}{C}║           🤖 DEX ARBITRAGE & FUNDING BOT         ║{X}")
-    print(f"{B}{C}╚══════════════════════════════════════════════════╝{X}")
-
-
-def run_trading_mode():
-    """
-    Заглушка для режиму торгівлі.
-    Тут пізніше буде код Execution Engine.
-    """
-    clear_screen()
-    print_header()
-    print(f"\n{Y}🚧 РЕЖИМ ТОРГІВЛІ (AUTO-EXECUTION) 🚧{X}")
-    print("-" * 50)
-    print(f"{R}Цей модуль ще не підключено.{X}")
-    print("На даному етапі ми налаштували моніторинг (Пункт 1).")
-    print("Наступним кроком буде реалізація надсилання ордерів.")
-
-    print(f"\n{B}Натисніть Enter, щоб повернутися в головне меню...{X}", end="")
-    input()
 
 
 def main_menu():
     while True:
-        clear_screen()
-        print_header()
+        os.system('cls' if os.name == 'nt' else 'clear')
+        print(f"{B}{G}╔══════════════════════════════════════════════════╗{X}")
+        print(f"{B}{G}║            🤖 DEX ARBITRAGE & FUNDING BOT        ║{X}")
+        print(f"{B}{G}╚══════════════════════════════════════════════════╝{X}")
+        print("")
+        print(" Оберіть режим роботи:")
+        print(f"   [{B}1{X}] 📊 Відкрити DEX Моніторинг (Scanner)")
+        print(f"   [{B}2{X}] 💸 Торгувати (Auto-Trade)")
+        print(f"   [{B}3{X}] 🚪 Вихід")
+        print("")
 
-        print(f"\n{B}Оберіть режим роботи:{X}")
-        print(f"   {Y}[1]{X} 📊 Відкрити DEX Моніторинг (Scanner)")
-        print(f"   {Y}[2]{X} 💸 Торгувати за даними параметрами (Auto-Trade)")
-        print(f"   {Y}[3]{X} 🚪 Вихід")
-
-        print(f"\n{C}Ваш вибір > {X}", end="")
-
-        choice = input().strip()
+        try:
+            # Тепер input() працює у стандартному режимі Windows
+            choice = input(f" Ваш вибір > ").strip()
+        except UnicodeDecodeError:
+            print(f"\n{R}❌ Помилка кодування. Спробуйте ще раз.{X}")
+            time.sleep(1)
+            continue
+        except EOFError:
+            break
+        except KeyboardInterrupt:
+            print("\nBye.")
+            sys.exit()
 
         if choice == '1':
+            script_path = os.path.join(SCRIPTS_DIR, 'monitor_spread_fund.py')
             try:
-                # Запускаємо монітор.
-                # Коли в моніторі натиснеш Ctrl+C, він викине виключення,
-                # ми його зловимо і повернемося в меню.
-                run_monitor()
+                # check=False дозволяє скрипту завершитися без крашу головного меню
+                subprocess.run([sys.executable, script_path], check=False)
             except KeyboardInterrupt:
-                pass  # Просто повертаємось в меню
-            except Exception as e:
-                print(f"\n{R}Помилка монітора: {e}{X}")
-                time.sleep(3)
+                pass
 
         elif choice == '2':
-            run_trading_mode()
+            script_path = os.path.join(SCRIPTS_DIR, 'auto_trade.py')
+            try:
+                subprocess.run([sys.executable, script_path], check=False)
+            except KeyboardInterrupt:
+                pass
 
         elif choice == '3':
-            print(f"\n{G}👋 Дякую за використання. До зустрічі!{X}")
+            print("👋 Bye!")
             sys.exit()
 
         else:
-            print(f"\n{R}⚠️ Невірний вибір. Введіть 1, 2 або 3.{X}")
+            print(f"{R}Невірний вибір.{X}")
             time.sleep(1)
 
 
@@ -82,5 +74,4 @@ if __name__ == "__main__":
     try:
         main_menu()
     except KeyboardInterrupt:
-        print(f"\n\n{G}👋 Примусове завершення.{X}")
         sys.exit()
