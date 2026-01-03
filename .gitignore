@@ -12,3 +12,5 @@ Scripts/test.py
 # Python кеш (ігнорує у всіх папках проєкту)
 **/__pycache__/
 *.py[cod]
+.venv/
+.cursor/
