@@ -54,8 +54,20 @@ class ParadexEngine:
         return result
 
     def _map_symbol(self, symbol):
-        if "-USD-PERP" in symbol: return symbol
-        return symbol.replace("_", "-").replace("USDC", "USD")
+        # 1. If it already has PERP, assume it's correct
+        if "PERP" in symbol: 
+            return symbol
+        
+        # 2. Clean up common variations (ETH/USD, ETH_USDC)
+        clean_sym = symbol.replace("/", "-").replace("_", "-").replace("USDC", "USD")
+        
+        # 3. Ensure base-quote structure
+        if "-" not in clean_sym:
+            # If input is just "ETH", assume "ETH-USD"
+            clean_sym = f"{clean_sym}-USD"
+            
+        # 4. Append -PERP if missing
+        return f"{clean_sym}-PERP"
 
     # --- INFO ---
 
@@ -71,8 +83,12 @@ class ParadexEngine:
                 base = symbol.split('-')[0]
                 bid = float(item.get('best_bid', item.get('bid', 0)) or 0)
                 ask = float(item.get('best_ask', item.get('ask', 0)) or 0)
-                raw_fund = float(item.get('funding_rate', 0) or 0)
-                data[base] = {'bid': bid, 'ask': ask, 'funding_pct': (raw_fund * 100) / 8}
+                # Paradex повертає funding_rate як ставку за 8 годин (як показує на сайті)
+                # Тому просто множимо на 100 для отримання відсотків
+                raw_fund = float(item.get('funding_rate_8h', item.get('funding_rate', 0)) or 0)
+                # Якщо є funding_rate_8h - використовуємо його, інакше funding_rate (який теж за 8h)
+                funding_pct = raw_fund * 100  # Конвертуємо в відсотки (вже за 8 годин)
+                data[base] = {'bid': bid, 'ask': ask, 'funding_pct': funding_pct}
             return data
         except:
             return {}

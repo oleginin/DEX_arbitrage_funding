@@ -97,20 +97,24 @@ class EtherealEngine:
         try:
             products_map = await client.products_by_ticker()
             self._products_cache = products_map
+            
             self._base_to_product = {
                 product.base_token_name.upper(): product
                 for ticker, product in products_map.items()
                 if "USD" in ticker
             }
-            self._id_to_product = {p.id: ticker for ticker, p in products_map.items()}
+            
+            # FIX: Ensure IDs are stored as strings to prevent int/str mismatches
+            self._id_to_product = {str(p.id): ticker for ticker, p in products_map.items()}
 
             self._symbol_to_product = {}
             for ticker, product in products_map.items():
                 self._symbol_to_product[ticker] = product
-                normalized = ticker.replace("-", "")
+                normalized = ticker.replace("-", "").replace("_", "")
                 if normalized not in self._symbol_to_product:
                     self._symbol_to_product[normalized] = product
         except Exception as e:
+            print(f"{R}❌ Error initializing products: {e}{X}")
             pass
 
     def _find_product(self, symbol):
@@ -173,12 +177,16 @@ class EtherealEngine:
             if not self._symbol_to_product: await self._ensure_products(client)
             product = self._find_product(symbol)
 
+            final_ticker = symbol # Default
+            tick_size = 1
+
             if product:
-                final_ticker = self._id_to_product.get(product.id, symbol)
+                # FIX: Use str(product.id) to lookup the official ticker
+                official_ticker = self._id_to_product.get(str(product.id))
+                if official_ticker:
+                    final_ticker = official_ticker
+                
                 tick_size = float(getattr(product, 'tick_size', 1))
-            else:
-                final_ticker = symbol
-                tick_size = 1
 
             if price and order_type == "LIMIT":
                 price_float = float(price)
