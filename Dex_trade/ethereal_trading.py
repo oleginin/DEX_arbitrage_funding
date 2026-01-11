@@ -4,13 +4,12 @@ from decimal import Decimal
 from pathlib import Path
 from dotenv import load_dotenv
 from uuid import UUID  # Потрібно для роботи з SDK
-from ethereal import AsyncRESTClient
 
 # --- COLORS ---
 G, R, Y, B, X = "\033[92m", "\033[91m", "\033[93m", "\033[1m", "\033[0m"
 
 try:
-    from ethereal import AsyncRESTClient
+    from ethereal_trading import AsyncRESTClient
 except ImportError:
     print(f"{R}❌ Ethereal SDK not found. Install via: pip install ethereal-sdk{X}")
 
@@ -97,13 +96,13 @@ class EtherealEngine:
         try:
             products_map = await client.products_by_ticker()
             self._products_cache = products_map
-            
+
             self._base_to_product = {
                 product.base_token_name.upper(): product
                 for ticker, product in products_map.items()
                 if "USD" in ticker
             }
-            
+
             # FIX: Ensure IDs are stored as strings to prevent int/str mismatches
             self._id_to_product = {str(p.id): ticker for ticker, p in products_map.items()}
 
@@ -177,7 +176,7 @@ class EtherealEngine:
             if not self._symbol_to_product: await self._ensure_products(client)
             product = self._find_product(symbol)
 
-            final_ticker = symbol # Default
+            final_ticker = symbol  # Default
             tick_size = 1
 
             if product:
@@ -185,7 +184,7 @@ class EtherealEngine:
                 official_ticker = self._id_to_product.get(str(product.id))
                 if official_ticker:
                     final_ticker = official_ticker
-                
+
                 tick_size = float(getattr(product, 'tick_size', 1))
 
             if price and order_type == "LIMIT":
@@ -441,6 +440,7 @@ class EtherealEngine:
         except Exception as e:
             print(f"Fetch error: {e}")
         return market_data
+
     def get_position(self, symbol):
         return self.loop.run_until_complete(self._get_specific_position_async(symbol))
 

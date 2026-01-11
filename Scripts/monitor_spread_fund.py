@@ -25,11 +25,11 @@ sys.path.append(str(ROOT_DIR))
 
 # --- ІМПОРТИ ---
 try:
-    from DEX.backpack import BackpackEngine
-    from DEX.paradex import ParadexEngine
+    from Dex_trade.backpack_trading import BackpackEngine
+    from Dex_trade.paradex_trading import ParadexEngine
 
     try:
-        from DEX.ethereal import EtherealEngine
+        from Dex_trade.ethereal_trading import EtherealEngine
     except ImportError:
         EtherealEngine = None
 except ImportError as e:
