@@ -14,4 +14,4 @@ Scripts/test.py
 *.py[cod]
 .venv/
 .cursor/
-Database/backpack_database.db
+Database/
