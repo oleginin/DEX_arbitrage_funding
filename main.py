@@ -10,6 +10,7 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS_DIR = os.path.join(ROOT_DIR, 'Scripts')
+Dex_DIR = os.path.join(ROOT_DIR, 'Dex_monitor')
 
 G, Y, B, R, X = "\033[92m", "\033[93m", "\033[1m", "\033[91m", "\033[0m"
 
@@ -23,7 +24,7 @@ def main_menu():
         print("")
         print(" Оберіть режим роботи:")
         print(f"   [{B}1{X}] 📊 Відкрити DEX Моніторинг (Scanner)")
-        print(f"   [{B}2{X}] 💸 Торгувати (Auto-Trade)")
+        print(f"   [{B}2{X}] 💸 Відкрити Backpack Monitor")
         print(f"   [{B}3{X}] 🚪 Вихід")
         print("")
 
@@ -37,7 +38,7 @@ def main_menu():
             sys.exit()
 
         if choice == '1':
-            script_path = os.path.join(SCRIPTS_DIR, 'monitor_spread_fund.py')
+            script_path = os.path.join(Dex_DIR, 'monitor_spread_fund.py')
             try:
                 # ДОДАНО '-u' - це вимикає буферизацію Python
                 subprocess.run([sys.executable, '-u', script_path], check=False)
