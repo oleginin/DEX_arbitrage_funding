@@ -81,19 +81,37 @@ def save_to_db(data_list, is_full_update):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     try:
-        if is_full_update:
-            for row in data_list:
+        # Єдина логіка для обох типів оновлення:
+        # 1. Пробуємо ОНОВИТИ існуючий запис (UPDATE)
+        # 2. Якщо запису немає -> СТВОРЮЄМО новий (INSERT)
+
+        for row in data_list:
+            if is_full_update:
+                # Повне оновлення (всі поля)
                 cursor.execute('''
-                    INSERT OR REPLACE INTO market_data 
-                    (token, bid, ask, spread_pct, funding_pct, freq_hours, oi_usd, volume_24h, last_updated)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    UPDATE market_data 
+                    SET bid=?, ask=?, spread_pct=?, funding_pct=?, freq_hours=?, oi_usd=?, volume_24h=?, last_updated=?
+                    WHERE token=?
                 ''', (
-                    row['Token'], row['Bid'], row['Ask'], row['Spread %'],
+                    row['Bid'], row['Ask'], row['Spread %'],
                     row['Funding %'], row['Freq (h)'], row['OI ($)'],
-                    row['Volume 24h ($)'], timestamp
+                    row['Volume 24h ($)'], timestamp, row['Token']
                 ))
-        else:
-            for row in data_list:
+
+                # Якщо UPDATE нічого не змінив (рядків 0), значить токена немає - робимо INSERT
+                if cursor.rowcount == 0:
+                    cursor.execute('''
+                        INSERT INTO market_data 
+                        (token, bid, ask, spread_pct, funding_pct, freq_hours, oi_usd, volume_24h, last_updated)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        row['Token'], row['Bid'], row['Ask'], row['Spread %'],
+                        row['Funding %'], row['Freq (h)'], row['OI ($)'],
+                        row['Volume 24h ($)'], timestamp
+                    ))
+
+            else:
+                # Швидке оновлення (Тільки ціна і фандінг, OI/Vol не чіпаємо)
                 cursor.execute('''
                     UPDATE market_data 
                     SET bid=?, ask=?, spread_pct=?, funding_pct=?, freq_hours=?, last_updated=?
@@ -102,6 +120,8 @@ def save_to_db(data_list, is_full_update):
                     row['Bid'], row['Ask'], row['Spread %'],
                     row['Funding %'], row['Freq (h)'], timestamp, row['Token']
                 ))
+
+                # Якщо нового токена ще немає, вставляємо його з нульовими OI/Vol
                 if cursor.rowcount == 0:
                     cursor.execute('''
                         INSERT INTO market_data 
@@ -111,6 +131,7 @@ def save_to_db(data_list, is_full_update):
                         row['Token'], row['Bid'], row['Ask'], row['Spread %'],
                         row['Funding %'], row['Freq (h)'], timestamp
                     ))
+
         conn.commit()
     except Exception as e:
         print(f"{C.RED}❌ DB Error: {e}{C.END}")
@@ -161,7 +182,11 @@ def fetch_extended_data():
                 continue
 
             stats = m.get('marketStats', {})
-            ticker = m.get('name')
+            raw_ticker = m.get('name')  # Приходить наприклад "ENA-USD"
+
+            # 🔥 ВИПРАВЛЕННЯ НАЗВИ 🔥
+            # Видаляємо "-USD" з кінця, якщо воно там є
+            ticker = raw_ticker.replace('-USD', '')
 
             # 2. Ціни
             bid = float(stats.get('bidPrice', 0))
@@ -173,7 +198,6 @@ def fetch_extended_data():
                 spread = ((ask - bid) / bid) * 100
 
             # 4. Фандінг (множимо на 100, бо це 1-годинна ставка)
-            # 0.000013 -> 0.0013%
             funding_raw = float(stats.get('fundingRate', 0))
             funding_pct = funding_raw * 100.0
 
@@ -232,23 +256,14 @@ def main():
                 last_slow_update = time.time()
 
             ts = datetime.now().strftime('%H:%M:%S')
-            time_until_slow = int(max(0, UPDATE_INTERVAL_SLOW - (time.time() - last_slow_update)))
 
             if first_run:
-                print("\n")
-                df = pd.DataFrame(data_list)
-                df = df.sort_values(by='Volume 24h ($)', ascending=False)
-                cols = ['Token', 'Bid', 'Ask', 'Spread %', 'Funding %', 'Freq (h)', 'OI ($)', 'Volume 24h ($)']
-
-                print("=" * 130)
-                print(f"{C.BOLD}📊 EXTENDED INITIAL DATA (Top 10){C.END}")
-                print(df[cols].head(10).to_string(index=False))
-                print("=" * 130)
+                # ПЕРШИЙ ЗАПУСК
                 print(f"{C.GREEN}✅ Monitor Active. Pairs found: {len(data_list)}{C.END}\n")
                 first_run = False
             else:
-                print(
-                    f"[{ts}] {C.GREEN}✅ Extended Updated ({len(data_list)} pairs).{C.END} Next Price: {UPDATE_INTERVAL_FAST}s | Next OI/Vol: {time_until_slow}s")
+                # НАСТУПНІ ЗАПУСКИ
+                print(f"{C.CYAN}[{ts}] Extended: оновив {len(data_list)} токенів.{C.END}")
 
             time.sleep(UPDATE_INTERVAL_FAST)
 

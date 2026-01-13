@@ -138,8 +138,6 @@ def get_json(url, params=None, retries=3):
             return response.json()
         except Exception as e:
             if i == retries - 1:
-                # Тільки якщо це остання спроба, можна вивести помилку для дебагу
-                # print(f"{C.RED}❌ API Error ({url}): {e}{C.END}")
                 return None
             time.sleep(0.5)
     return None
@@ -164,9 +162,7 @@ def get_markets_meta():
 def fetch_pair_summary(symbol, freq):
     """
     Отримує дані для ОДНІЄЇ пари.
-    Це гарантовано працює, на відміну від bulk-запиту.
     """
-    # Параметр market є обов'язковим для цього ендпоінту, якщо не працює bulk
     data = get_json(f"{API_BASE}/markets/summary", params={'market': symbol})
 
     if not data or 'results' not in data or not data['results']:
@@ -270,23 +266,14 @@ def main():
 
             # Вивід
             ts = datetime.now().strftime('%H:%M:%S')
-            time_until_slow = int(max(0, UPDATE_INTERVAL_SLOW - (time.time() - last_slow_update)))
 
             if first_run:
-                print("\n")
-                df = pd.DataFrame(results)
-                df = df.sort_values(by='Volume 24h ($)', ascending=False)
-                cols = ['Token', 'Bid', 'Ask', 'Spread %', 'Funding %', 'Freq (h)', 'OI ($)', 'Volume 24h ($)']
 
-                print("=" * 130)
-                print(f"{C.BOLD}📊 PARADEX LIVE DATA (Top 10){C.END}")
-                print(df[cols].head(10).to_string(index=False))
-                print("=" * 130)
                 print(f"{C.GREEN}✅ Monitor Active.{C.END}\n")
                 first_run = False
             else:
-                print(
-                    f"[{ts}] {C.GREEN}✅ Paradex Updated ({len(results)} pairs).{C.END} Next Price: {UPDATE_INTERVAL_FAST}s | Next OI/Vol: {time_until_slow}s")
+                # НАСТУПНІ ЗАПУСКИ: Короткий лог
+                print(f"{C.CYAN}[{ts}] Paradex: оновив {len(results)} токенів.{C.END}")
 
             time.sleep(UPDATE_INTERVAL_FAST)
 

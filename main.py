@@ -1,69 +1,115 @@
+import multiprocessing
+import time
 import sys
 import os
-import subprocess
-import time
-import io
 
-# --- FIX WINDOWS ENCODING ---
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+# ═══════════════════════════════════════════════════════════════════════════
+# ⚙️ НАЛАШТУВАННЯ ШЛЯХІВ
+# ═══════════════════════════════════════════════════════════════════════════
 
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-SCRIPTS_DIR = os.path.join(ROOT_DIR, 'Scripts')
-Dex_DIR = os.path.join(ROOT_DIR, 'Dex_monitor')
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+MONITORS_DIR = os.path.join(CURRENT_DIR, 'Dex_monitor')
 
-G, Y, B, R, X = "\033[92m", "\033[93m", "\033[1m", "\033[91m", "\033[0m"
+if MONITORS_DIR not in sys.path:
+    sys.path.append(MONITORS_DIR)
+
+try:
+    import backpack_monitor
+    import paradex_monitor
+    import variational_monitor
+    import extended_monitor
+    import lighter_monitor
+except ImportError as e:
+    print(f"❌ Error importing monitors: {e}")
+    sys.exit(1)
 
 
-def main_menu():
-    while True:
-        os.system('cls' if os.name == 'nt' else 'clear')
-        print(f"{B}{G}╔══════════════════════════════════════════════════╗{X}")
-        print(f"{B}{G}║            🤖 DEX ARBITRAGE & FUNDING BOT        ║{X}")
-        print(f"{B}{G}╚══════════════════════════════════════════════════╝{X}")
-        print("")
-        print(" Оберіть режим роботи:")
-        print(f"   [{B}1{X}] 📊 Відкрити DEX Моніторинг (Scanner)")
-        print(f"   [{B}2{X}] 💸 Відкрити Backpack Monitor")
-        print(f"   [{B}3{X}] 🚪 Вихід")
-        print("")
+# ═══════════════════════════════════════════════════════════════════════════
+# 🚀 ГОЛОВНИЙ КЛАС
+# ═══════════════════════════════════════════════════════════════════════════
 
-        try:
-            choice = input(f" Ваш вибір > ").strip()
-        except UnicodeDecodeError:
-            continue
-        except EOFError:
-            break
-        except KeyboardInterrupt:
-            sys.exit()
+class C:
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BOLD = '\033[1m'
+    END = '\033[0m'
 
-        if choice == '1':
-            script_path = os.path.join(Dex_DIR, 'monitor_spread_fund.py')
-            try:
-                # ДОДАНО '-u' - це вимикає буферизацію Python
-                subprocess.run([sys.executable, '-u', script_path], check=False)
-            except KeyboardInterrupt:
-                pass
 
-        elif choice == '2':
-            script_path = os.path.join(SCRIPTS_DIR, 'auto_trade.py')
-            try:
-                # ДОДАНО '-u'
-                subprocess.run([sys.executable, '-u', script_path], check=False)
-            except KeyboardInterrupt:
-                pass
-
-        elif choice == '3':
-            print("👋 Bye!")
-            sys.exit()
-
-        else:
-            print(f"{R}Невірний вибір.{X}")
-            time.sleep(1)
+def run_monitor(target_func, name):
+    """Обгортка для запуску процесу."""
+    try:
+        target_func()
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        # Логуємо помилку, щоб знати, чому процес впав
+        print(f"{C.RED}❌ Process {name} crashed: {e}{C.END}")
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
+
+    print(f"\n{C.BOLD}{C.CYAN}🚀 LAUNCHING ALL EXCHANGE MONITORS...{C.END}")
+
+    # Список: (Функція, Назва, Час останнього падіння для захисту від спаму)
+    # Третій елемент 0 — це timestamp останнього рестарту
+    monitors_config = [
+        {"func": backpack_monitor.main, "name": "Backpack", "last_restart": 0},
+        {"func": paradex_monitor.main, "name": "Paradex", "last_restart": 0},
+        {"func": variational_monitor.main, "name": "Variational", "last_restart": 0},
+        {"func": extended_monitor.main, "name": "Extended", "last_restart": 0},
+        {"func": lighter_monitor.main, "name": "Lighter (WSS)", "last_restart": 0}
+    ]
+
+    processes = [None] * len(monitors_config)
+
+
+    # Функція для запуску конкретного процесу за індексом
+    def start_process(index):
+        cfg = monitors_config[index]
+        p = multiprocessing.Process(target=run_monitor, args=(cfg["func"], cfg["name"]))
+        p.start()
+        processes[index] = p
+        print(f"{C.GREEN}✅ Started: {cfg['name']} (PID: {p.pid}){C.END}")
+        return p
+
+
+    # Первинний запуск
+    for i in range(len(monitors_config)):
+        start_process(i)
+        time.sleep(0.5)  # Невелика пауза між стартами, щоб не пікувати CPU
+
+    print(f"\n{C.YELLOW}⚡ All systems active. CPU Monitor: optimized.{C.END}")
+    print(f"{C.YELLOW}🛑 Press Ctrl+C to stop.{C.END}\n")
+
     try:
-        main_menu()
+        while True:
+            # 1. Збільшуємо інтервал перевірки.
+            # Головному процесу достатньо прокидатися раз на 5-10 секунд.
+            time.sleep(5)
+
+            for i, p in enumerate(processes):
+                if not p.is_alive():
+                    cfg = monitors_config[i]
+                    name = cfg["name"]
+
+                    # 2. Логіка захисту від швидкого перезапуску (Backoff)
+                    current_time = time.time()
+                    if current_time - cfg["last_restart"] < 10:
+                        # Якщо впав швидше ніж за 10 секунд після старту, чекаємо
+                        print(f"{C.RED}⚠️ {name} keeps crashing. Waiting before restart...{C.END}")
+                        time.sleep(5)
+
+                    print(f"{C.YELLOW}🔄 Restarting {name}...{C.END}")
+                    monitors_config[i]["last_restart"] = time.time()
+                    start_process(i)
+
     except KeyboardInterrupt:
-        sys.exit()
+        print(f"\n{C.RED}🛑 STOPPING ALL MONITORS...{C.END}")
+        for p in processes:
+            if p and p.is_alive():
+                p.terminate()
+                p.join()
+        print(f"{C.GREEN}✅ Done.{C.END}")

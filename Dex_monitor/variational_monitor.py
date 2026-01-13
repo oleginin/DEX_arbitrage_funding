@@ -239,23 +239,14 @@ def main():
                 last_slow_update = time.time()
 
             ts = datetime.now().strftime('%H:%M:%S')
-            time_until_slow = int(max(0, UPDATE_INTERVAL_SLOW - (time.time() - last_slow_update)))
 
             if first_run:
-                print("\n")
-                df = pd.DataFrame(data_list)
-                df = df.sort_values(by='Volume 24h ($)', ascending=False)
-                cols = ['Token', 'Bid', 'Ask', 'Spread %', 'Funding %', 'Freq (h)', 'OI ($)', 'Volume 24h ($)']
-
-                print("=" * 130)
-                print(f"{C.BOLD}📊 VARIATIONAL INITIAL DATA (Top 10){C.END}")
-                print(df[cols].head(10).to_string(index=False))
-                print("=" * 130)
+                # ПЕРШИЙ ЗАПУСК: Таблиця
                 print(f"{C.GREEN}✅ Monitor Active. Pairs: {len(data_list)}{C.END}\n")
                 first_run = False
             else:
-                print(
-                    f"[{ts}] {C.GREEN}✅ Variational Updated ({len(data_list)} pairs).{C.END} Next Price: {UPDATE_INTERVAL_FAST}s | Next OI/Vol: {time_until_slow}s")
+                # НАСТУПНІ ЗАПУСКИ: Короткий лог
+                print(f"{C.CYAN}[{ts}] Variational: оновив {len(data_list)} токенів.{C.END}")
 
             time.sleep(UPDATE_INTERVAL_FAST)
 

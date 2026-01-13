@@ -269,9 +269,6 @@ def main():
             # --- ЛОГІКА ВИВОДУ ---
             ts = datetime.now().strftime('%H:%M:%S')
 
-            # Розрахунок часу до наступного ПОВНОГО оновлення
-            time_until_slow = max(0, UPDATE_INTERVAL_SLOW - (time.time() - last_slow_update))
-
             if first_run:
                 # ПЕРШИЙ ЗАПУСК: Виводимо таблицю
                 print("\n")
@@ -286,9 +283,8 @@ def main():
                 print(f"{C.GREEN}✅ First run complete. Switching to monitoring mode.{C.END}\n")
                 first_run = False
             else:
-                # НАСТУПНІ ЗАПУСКИ: Тільки один рядок
-                print(
-                    f"[{ts}] {C.GREEN}✅ Backpack Updated.{C.END} Next Price/Fund: {UPDATE_INTERVAL_FAST}s | Next OI/Vol: {int(time_until_slow)}s")
+                # НАСТУПНІ ЗАПУСКИ: Короткий лог
+                print(f"{C.CYAN}[{ts}] Backpack: оновив {len(results)} токенів.{C.END}")
 
             time.sleep(UPDATE_INTERVAL_FAST)
 
@@ -296,6 +292,7 @@ def main():
             print(f"\n{C.RED}🛑 Stopped by user{C.END}")
             break
         except Exception as e:
+            # Цей рядок обов'язково залишаємо, щоб бачити критичні помилки
             print(f"\n{C.RED}❌ Critical Error: {e}{C.END}")
             time.sleep(5)
 
