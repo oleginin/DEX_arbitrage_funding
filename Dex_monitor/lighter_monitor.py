@@ -6,6 +6,7 @@ import time
 import threading
 import os
 import sys
+from datetime import datetime  # <--- ВАЖЛИВО!
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ⚙️ КОНФІГУРАЦІЯ
@@ -69,7 +70,7 @@ def init_db():
 
 
 def update_db_loop():
-    # Даємо трохи часу на старті, щоб зібрати перші дані з сокету
+    # Даємо трохи часу на старті
     time.sleep(5)
 
     while True:
@@ -96,8 +97,6 @@ def update_db_loop():
 
                     funding = stats.get('funding', 0.0)
                     vol_usd = stats.get('vol', 0.0)
-
-                    # OI з API вже в USD, множимо на 2 для Total Side
                     oi_usd = stats.get('oi', 0.0) * 2.0
 
                     data_to_save.append({
@@ -111,9 +110,11 @@ def update_db_loop():
                     })
 
             if data_to_save:
-                conn = sqlite3.connect(DB_PATH)
+                conn = sqlite3.connect(DB_PATH, timeout=10)  # Додав таймаут
                 cursor = conn.cursor()
-                ts = time.strftime('%H:%M:%S')
+
+                # 🔥 ВИПРАВЛЕНО: Повний формат дати, як у інших моніторах
+                ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
                 for row in data_to_save:
                     cursor.execute('''
@@ -124,14 +125,16 @@ def update_db_loop():
                         row['token'], row['bid'], row['ask'], row['spread'],
                         row['funding'], 1, row['oi'], row['vol'], ts
                     ))
+
                 conn.commit()
+
+                # 🔥 ВАЖЛИВО: Примусово оновлюємо WAL файл, щоб агрегатор побачив зміни
+                conn.execute('PRAGMA wal_checkpoint(PASSIVE);')
+
                 conn.close()
 
-                # === ОНОВЛЕНИЙ ЛОГ ===
-                # Замість постійного мерехтіння пишемо раз на 15 секунд
-                print(f"{C.CYAN}[{ts}] Lighter: оновив {len(data_to_save)} токенів.{C.END}")
+                print(f"{C.CYAN}[{ts.split()[1]}] Lighter: оновив {len(data_to_save)} токенів.{C.END}")
 
-            # === ЗАТРИМКА 15 СЕКУНД (Зменшує навантаження на CPU) ===
             time.sleep(15)
 
         except Exception as e:
@@ -164,16 +167,13 @@ def on_message(ws, message):
         msg_type = data.get('type')
 
         with data_lock:
-            # === ОБРОБКА СТАТИСТИКИ ===
             if msg_type == 'update/market_stats':
                 all_stats_map = data.get('market_stats', {})
-
                 for mid_str, stats in all_stats_map.items():
                     try:
                         mid = int(mid_str)
                     except:
                         continue
-
                     raw_funding = float(stats.get('current_funding_rate', 0) or 0)
                     vol_usd = float(stats.get('daily_quote_token_volume', 0) or 0)
                     oi_usd_raw = float(stats.get('open_interest', 0) or 0)
@@ -184,7 +184,6 @@ def on_message(ws, message):
                         'oi': oi_usd_raw
                     }
 
-            # === ОБРОБКА ОРДЕРБУКУ ===
             elif msg_type == 'update/order_book':
                 channel = data.get('channel', '')
                 try:
@@ -262,7 +261,6 @@ def main():
     id_to_symbol = get_market_map()
     print(f"{C.GREEN}✅ Loaded {len(id_to_symbol)} pairs.{C.END}")
 
-    # Запускаємо цикл оновлення БД в окремому потоці
     db_thread = threading.Thread(target=update_db_loop, daemon=True)
     db_thread.start()
 
