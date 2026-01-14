@@ -3,20 +3,30 @@ import pandas as pd
 import time
 import os
 from datetime import datetime, timedelta
-from contextlib import closing  # 🔥 Ця штука гарантує закриття
+from contextlib import closing
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ⚙️ КОНФІГУРАЦІЯ
 # ═══════════════════════════════════════════════════════════════════════════
 
 PAUSE_AFTER_UPDATE = 15
-RESET_HISTORY_ON_START = True  # Очищати історію при старті
-STATS_WARMUP_SEC = 60  # Час розігріву (без історії)
+RESET_HISTORY_ON_START = True
+STATS_WARMUP_SEC = 60
 
-# 🛑 ФІЛЬТРИ
-MIN_OI_USD = 500000
-MIN_VOL_USD = 500000
+# 🔥 НАЛАШТУВАННЯ ЧУТЛИВОСТІ
+# Якщо спред менший за це число, він вважається "шумом" (пилом/помилкою)
+# і ми НЕ дозволяємо йому ставати новим мінімумом.
+MIN_HISTORY_SPREAD_THRESHOLD = 0.2
+
+IGNORE_NEGATIVE_HISTORY = True
+
+# 🛑 ФІЛЬТРИ (Вимкнені, щоб бачити все)
+MIN_OI_USD = 0
+MIN_VOL_USD = 0
+
+# ⏰ СИНХРОНІЗАЦІЯ
 MAX_DATA_DELAY_SEC = 60
+MAX_SYNC_DIFF_SEC = 25  # Якщо хочеш жорсткіше - став 2-5 сек
 
 # --- ШЛЯХИ ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,7 +38,7 @@ SOURCE_DBS = [
     {'name': 'Paradex', 'file': 'paradex_database.db'},
     {'name': 'Variational', 'file': 'variational_database.db'},
     {'name': 'Extended', 'file': 'extended_database.db'},
-    # {'name': 'Lighter', 'file': 'lighter_database.db'},
+    {'name': 'Lighter', 'file': 'lighter_database.db'},
 ]
 
 TARGET_DB_NAME = 'arbitrage_dashboard.db'
@@ -47,18 +57,19 @@ class C:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 🛠️ ІНІЦІАЛІЗАЦІЯ
+# 🛠️ ІНІЦІАЛІЗАЦІЯ (ПРАВИЛЬНИЙ UNIQUE KEY)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def init_target_db():
     if not os.path.exists(DB_FOLDER):
         os.makedirs(DB_FOLDER)
 
-    # Використовуємо closing(), щоб з'єднання точно закрилося
     with closing(sqlite3.connect(TARGET_DB_PATH)) as conn:
         conn.execute('PRAGMA journal_mode=WAL;')
         cursor = conn.cursor()
 
+        # 🔥 ЗМІНА: Ключ унікальності тепер (token, buy_exchange, sell_exchange)
+        # Це гарантує, що "Lighter -> Backpack" і "Backpack -> Lighter" — це різні записи.
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS live_opportunities (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,7 +90,8 @@ def init_target_db():
                 oi_short_usd REAL,
                 vol_long_usd REAL,
                 vol_short_usd REAL,
-                last_updated TIMESTAMP
+                last_updated TIMESTAMP,
+                CONSTRAINT unique_path UNIQUE(token, buy_exchange, sell_exchange)
             )
         ''')
 
@@ -102,7 +114,6 @@ def init_target_db():
             try:
                 cursor.execute("DELETE FROM spread_history")
                 conn.commit()
-                # 🔥 TRUNCATE примусово очищає WAL файл
                 cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
                 print(f"{C.RED}🧹 History CLEARED & WAL Truncated.{C.END}")
             except Exception as e:
@@ -112,7 +123,7 @@ def init_target_db():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 📥 ЧИТАННЯ (SAFE MODE)
+# 📥 ЧИТАННЯ
 # ═══════════════════════════════════════════════════════════════════════════
 
 def get_data_from_source(db_config):
@@ -120,10 +131,8 @@ def get_data_from_source(db_config):
     if not os.path.exists(db_path): return None
 
     try:
-        # closing() гарантує закриття навіть при помилках
         with closing(sqlite3.connect(db_path, timeout=10, isolation_level=None)) as conn:
             conn.execute('PRAGMA journal_mode=WAL;')
-            # PASSIVE просто читає, не блокуючи інших
             conn.execute('PRAGMA wal_checkpoint(PASSIVE);')
 
             query = "SELECT * FROM market_data"
@@ -141,7 +150,6 @@ def get_data_from_source(db_config):
             if 'freq_hours' not in fresh_df.columns: fresh_df['freq_hours'] = 1
 
             return fresh_df
-
     except Exception:
         return None
 
@@ -178,8 +186,12 @@ def calculate_live_routes(all_data_df):
                 if sell_row['oi_usd'] < MIN_OI_USD or sell_row['volume_24h'] < MIN_VOL_USD: continue
                 if buy_row['exchange'] == sell_row['exchange']: continue
 
+                time_diff = abs((buy_row['last_updated'] - sell_row['last_updated']).total_seconds())
+                if time_diff > MAX_SYNC_DIFF_SEC: continue
+
                 buy_price = buy_row['ask']
                 sell_price = sell_row['bid']
+
                 spread = ((sell_price - buy_price) / buy_price) * 100
 
                 fund_long_pct, freq_long = get_effective_funding(buy_row)
@@ -213,7 +225,7 @@ def calculate_live_routes(all_data_df):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 💾 СТАТИСТИКА (SAFE MODE)
+# 💾 СТАТИСТИКА (ВИПРАВЛЕНО ГРУПУВАННЯ ПО ТОКЕНАХ)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def update_history_and_get_stats(df_live):
@@ -228,12 +240,15 @@ def update_history_and_get_stats(df_live):
             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
             for _, row in df_live.iterrows():
+                if IGNORE_NEGATIVE_HISTORY and row['spread'] <= MIN_HISTORY_SPREAD_THRESHOLD:
+                    continue
                 history_data.append((row['token'], row['route'], row['spread'], now_str))
 
-            cursor.executemany(
-                "INSERT INTO spread_history (token, route, spread_pct, timestamp) VALUES (?, ?, ?, ?)",
-                history_data
-            )
+            if history_data:
+                cursor.executemany(
+                    "INSERT INTO spread_history (token, route, spread_pct, timestamp) VALUES (?, ?, ?, ?)",
+                    history_data
+                )
 
             cursor.execute("DELETE FROM spread_history WHERE timestamp < datetime('now', '-30 days', '-1 hour')")
             conn.commit()
@@ -241,29 +256,58 @@ def update_history_and_get_stats(df_live):
             elapsed_time = time.time() - SCRIPT_START_TIME
 
             if elapsed_time < STATS_WARMUP_SEC:
-                df_live['min_24h'] = df_live['spread']
-                df_live['max_24h'] = df_live['spread']
-                df_live['min_30d'] = df_live['spread']
-                df_live['max_30d'] = df_live['spread']
+                for col in ['min_24h', 'max_24h', 'min_30d', 'max_30d']:
+                    df_live[col] = df_live['spread']
                 return df_live
+
             else:
-                stats_query = """
+                # 🔥 ВИПРАВЛЕННЯ ТУТ:
+                # Додаємо token у SELECT та GROUP BY
+                stats_query = f"""
                 SELECT 
+                    token, 
                     route,
-                    MIN(CASE WHEN timestamp >= datetime('now', '-1 day') THEN spread_pct END) as min_24h,
-                    MAX(CASE WHEN timestamp >= datetime('now', '-1 day') THEN spread_pct END) as max_24h,
-                    MIN(spread_pct) as min_30d,
-                    MAX(spread_pct) as max_30d
+                    MIN(spread_pct) as db_min_24h,
+                    MAX(spread_pct) as db_max_24h,
+                    MIN(spread_pct) as db_min_30d,
+                    MAX(spread_pct) as db_max_30d
                 FROM spread_history
-                WHERE timestamp >= datetime('now', '-30 days')
-                GROUP BY route
+                WHERE timestamp >= datetime('now', '-24 hours')
+                  AND spread_pct > {MIN_HISTORY_SPREAD_THRESHOLD} 
+                GROUP BY token, route  -- 🔥 Групуємо по унікальній парі Токен+Маршрут
                 """
                 df_stats = pd.read_sql_query(stats_query, conn)
 
                 if not df_stats.empty:
-                    df_final = pd.merge(df_live, df_stats, on='route', how='left')
-                    for col in ['min_24h', 'max_24h', 'min_30d', 'max_30d']:
-                        df_final[col] = df_final[col].fillna(df_final['spread'])
+                    # 🔥 З'єднуємо таблиці по ДВОХ колонках: token і route
+                    df_final = pd.merge(df_live, df_stats, on=['token', 'route'], how='left')
+
+                    # Далі логіка залишається тією ж
+                    df_final['min_24h'] = df_final['db_min_24h'].fillna(df_final['spread'])
+                    df_final['max_24h'] = df_final['db_max_24h'].fillna(df_final['spread'])
+                    df_final['min_30d'] = df_final['db_min_30d'].fillna(df_final['spread'])
+                    df_final['max_30d'] = df_final['db_max_30d'].fillna(df_final['spread'])
+
+                    def force_update_min(row, col_min):
+                        current = row['spread']
+                        history_min = row[col_min]
+                        if current > MIN_HISTORY_SPREAD_THRESHOLD and current < history_min:
+                            return current
+                        return history_min
+
+                    def force_update_max(row, col_max):
+                        current = row['spread']
+                        history_max = row[col_max]
+                        if current > history_max:
+                            return current
+                        return history_max
+
+                    df_final['min_24h'] = df_final.apply(lambda x: force_update_min(x, 'min_24h'), axis=1)
+                    df_final['max_24h'] = df_final.apply(lambda x: force_update_max(x, 'max_24h'), axis=1)
+
+                    df_final['min_30d'] = df_final.apply(lambda x: force_update_min(x, 'min_30d'), axis=1)
+                    df_final['max_30d'] = df_final.apply(lambda x: force_update_max(x, 'max_30d'), axis=1)
+
                     return df_final
                 else:
                     for col in ['min_24h', 'max_24h', 'min_30d', 'max_30d']:
@@ -274,10 +318,9 @@ def update_history_and_get_stats(df_live):
         print(f"{C.RED}❌ Stats Error: {e}{C.END}")
         return df_live
 
-    # ═══════════════════════════════════════════════════════════════════════════
 
-
-# 🔄 ОНОВЛЕННЯ LIVE (З TRUNCATE)
+# ═══════════════════════════════════════════════════════════════════════════
+# 🔄 ОНОВЛЕННЯ БД (STATIC ID з правильним KEY)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def update_dashboard_db(df_final):
@@ -287,10 +330,9 @@ def update_dashboard_db(df_final):
         with closing(sqlite3.connect(TARGET_DB_PATH, timeout=10)) as conn:
             cursor = conn.cursor()
             cursor.execute("BEGIN TRANSACTION")
-            cursor.execute("DELETE FROM live_opportunities")
 
-            data_to_insert = []
             if not df_final.empty:
+                data_to_insert = []
                 for _, row in df_final.iterrows():
                     data_to_insert.append((
                         row['token'], row['route'], row['buy_exchange'], row['sell_exchange'],
@@ -301,19 +343,40 @@ def update_dashboard_db(df_final):
                         timestamp
                     ))
 
-                cursor.executemany('''
+                # 🔥 ОНОВЛЕНО: ON CONFLICT(token, buy_exchange, sell_exchange)
+                # Тепер оновлення прив'язане до конкретних бірж, а не до тексту маршруту.
+
+                sql_upsert = '''
                     INSERT INTO live_opportunities 
                     (token, route, buy_exchange, sell_exchange, buy_price, sell_price, 
                     spread_pct, spread_min_24h, spread_max_24h, spread_min_30d, spread_max_30d,
                     net_funding_pct, funding_freq, 
                     oi_long_usd, oi_short_usd, vol_long_usd, vol_short_usd, last_updated)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', data_to_insert)
+
+                    ON CONFLICT(token, buy_exchange, sell_exchange) DO UPDATE SET
+                        route = excluded.route,  -- Навіть якщо текст маршруту зміниться, ми його оновимо
+                        buy_price = excluded.buy_price,
+                        sell_price = excluded.sell_price,
+                        spread_pct = excluded.spread_pct,
+                        spread_min_24h = excluded.spread_min_24h,
+                        spread_max_24h = excluded.spread_max_24h,
+                        spread_min_30d = excluded.spread_min_30d,
+                        spread_max_30d = excluded.spread_max_30d,
+                        net_funding_pct = excluded.net_funding_pct,
+                        oi_long_usd = excluded.oi_long_usd,
+                        oi_short_usd = excluded.oi_short_usd,
+                        vol_long_usd = excluded.vol_long_usd,
+                        vol_short_usd = excluded.vol_short_usd,
+                        last_updated = excluded.last_updated
+                '''
+                cursor.executemany(sql_upsert, data_to_insert)
+
+            # Видаляємо тільки мертве (старіше 1 години)
+            cursor.execute("DELETE FROM live_opportunities WHERE last_updated < datetime('now', '-1 hour')")
 
             conn.commit()
-
-            # 🔥 МАГІЯ: Примусово обрізаємо WAL файл, щоб він зник (або став 0 байт)
-            cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            cursor.execute("PRAGMA wal_checkpoint(PASSIVE);")
 
     except Exception as e:
         print(f"{C.RED}❌ Write Error: {e}{C.END}")
@@ -324,21 +387,19 @@ def update_dashboard_db(df_final):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main():
-    print(f"\n{C.CYAN}🚀 ARBITRAGE AGGREGATOR (AUTO-CLOSE WAL){C.END}")
-    print(f"{C.YELLOW}⏳ Warmup: {STATS_WARMUP_SEC}s | Reset History: {RESET_HISTORY_ON_START}{C.END}")
+    print(f"\n{C.CYAN}🚀 ARBITRAGE AGGREGATOR (STRICT KEY & STATIC ID){C.END}")
+    print(f"{C.YELLOW}Min Threshold: {MIN_HISTORY_SPREAD_THRESHOLD}% | Warmup: {STATS_WARMUP_SEC}s{C.END}")
 
     init_target_db()
 
     while True:
         start_time = time.time()
         dfs = []
-        total_rows_read = 0
 
         for db_conf in SOURCE_DBS:
             df = get_data_from_source(db_conf)
             if df is not None and not df.empty:
                 dfs.append(df)
-                total_rows_read += len(df)
 
         if not dfs:
             print(f"\r{C.RED}⚠️ Waiting for FRESH data...{C.END}", end="")
@@ -346,6 +407,7 @@ def main():
             continue
 
         full_market_data = pd.concat(dfs, ignore_index=True)
+
         df_live = calculate_live_routes(full_market_data)
         df_final = update_history_and_get_stats(df_live)
 
@@ -359,14 +421,7 @@ def main():
         top_spread = df_final.iloc[0]['spread'] if not df_final.empty else 0.0
 
         ts = datetime.now().strftime('%H:%M:%S')
-
-        elapsed = time.time() - SCRIPT_START_TIME
-        warmup_status = ""
-        if elapsed < STATS_WARMUP_SEC:
-            warmup_status = f"{C.YELLOW}[WARMUP {int(elapsed)}s]{C.END} "
-
-        print(f"\r{C.CYAN}[{ts}] {warmup_status}Routes: {count}. Top: {top_spread:.2f}%. Took: {duration:.3f}s{C.END}",
-              end="")
+        print(f"\r{C.CYAN}[{ts}] Routes: {count}. Top: {top_spread:.2f}%. Took: {duration:.3f}s{C.END}", end="")
 
         time.sleep(PAUSE_AFTER_UPDATE)
 

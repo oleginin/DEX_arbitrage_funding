@@ -1,35 +1,33 @@
+import websocket
 import requests
-import pandas as pd
-import concurrent.futures
-import time
+import json
 import sqlite3
+import time
+import threading
 import os
 from datetime import datetime
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ⚙️ КОНФІГУРАЦІЯ ШЛЯХІВ ТА ТАЙМЕРІВ
+# ⚙️ КОНФІГУРАЦІЯ
 # ═══════════════════════════════════════════════════════════════════════════
 
-API_BASE = 'https://api.backpack.exchange/api/v1'
+WS_URL = "wss://ws.backpack.exchange"
+REST_API_URL = "https://api.backpack.exchange/api/v1"
 
-# --- НАЛАШТУВАННЯ ПАПОК (Динамічні шляхи) ---
-# Отримуємо шлях до папки, де лежить скрипт (Dex_monitor)
+# --- ШЛЯХИ ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# Виходимо на рівень вище (Root)
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
-# Вказуємо шлях до папки Database (Root/Database)
 DB_FOLDER = os.path.join(PROJECT_ROOT, 'Database')
 DB_NAME = 'backpack_database.db'
 DB_PATH = os.path.join(DB_FOLDER, DB_NAME)
 
-# --- ТАЙМЕРИ ---
-UPDATE_INTERVAL_FAST = 15  # Ціна, Фандінг
-UPDATE_INTERVAL_SLOW = 3600  # OI, Volume
+UPDATE_INTERVAL_FAST = 15
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'application/json'
-}
+# --- ГЛОБАЛЬНЕ СХОВИЩЕ ---
+local_books = {}  # Стакани
+market_stats = {}  # Статистика
+symbols_map = []
+data_lock = threading.Lock()
 
 
 class C:
@@ -41,26 +39,39 @@ class C:
     END = '\033[0m'
 
 
-pd.set_option('display.max_rows', None)
-pd.set_option('display.width', 250)
-pd.set_option('display.float_format', '{:,.4f}'.format)
+# ═══════════════════════════════════════════════════════════════════════════
+# 🕒 СИНХРОНІЗАЦІЯ
+# ═══════════════════════════════════════════════════════════════════════════
+
+def wait_for_next_cycle(interval=15):
+    now = time.time()
+    next_ts = (int(now) // interval + 1) * interval
+    sleep_time = next_ts - now
+    if sleep_time > 0:
+        time.sleep(sleep_time)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 🗄️ РОБОТА З БАЗОЮ ДАНИХ
+# 🛠️ ХЕЛПЕР: НОРМАЛІЗАЦІЯ ІМЕНІ
+# ═══════════════════════════════════════════════════════════════════════════
+
+def get_clean_symbol(raw_symbol):
+    return raw_symbol.replace('_USDC_PERP', '').replace('_USDC', '').replace('_PERP', '')
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 🗄️ БАЗА ДАНИХ
 # ═══════════════════════════════════════════════════════════════════════════
 
 def init_db():
-    """Створює зовнішню папку Database та таблицю"""
     if not os.path.exists(DB_FOLDER):
         try:
             os.makedirs(DB_FOLDER)
-            print(f"{C.GREEN}📂 Створено папку: {DB_FOLDER}{C.END}")
-        except OSError as e:
-            print(f"{C.RED}❌ Помилка створення папки: {e}{C.END}")
-            return
+        except:
+            pass
 
     conn = sqlite3.connect(DB_PATH)
+    conn.execute('PRAGMA journal_mode=WAL;')
     cursor = conn.cursor()
 
     cursor.execute('''
@@ -78,222 +89,220 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
-    print(f"{C.GREEN}✅ База даних підключена: {DB_PATH}{C.END}")
+    print(f"{C.GREEN}✅ DB Connected: {DB_PATH}{C.END}")
 
 
-def save_to_db(data_list, is_full_update):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+def update_db_loop():
+    time.sleep(2)
 
-    try:
-        if is_full_update:
-            # Повне оновлення (включаючи OI та Volume)
-            for row in data_list:
-                cursor.execute('''
-                    INSERT OR REPLACE INTO market_data 
-                    (token, bid, ask, spread_pct, funding_pct, freq_hours, oi_usd, volume_24h, last_updated)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    row['Token'], row['Bid'], row['Ask'], row['Spread %'],
-                    row['Funding %'], row['Freq (h)'], row['OI ($)'],
-                    row['Volume 24h ($)'], timestamp
-                ))
-        else:
-            # Швидке оновлення (Тільки ціни/фандінг)
-            for row in data_list:
-                cursor.execute('''
-                    UPDATE market_data 
-                    SET bid=?, ask=?, spread_pct=?, funding_pct=?, freq_hours=?, last_updated=?
-                    WHERE token=?
-                ''', (
-                    row['Bid'], row['Ask'], row['Spread %'],
-                    row['Funding %'], row['Freq (h)'], timestamp, row['Token']
-                ))
+    while True:
+        wait_for_next_cycle(UPDATE_INTERVAL_FAST)
 
-                # Якщо токена немає - додаємо (UPSERT для нових лістингів)
-                if cursor.rowcount == 0:
+        try:
+            data_to_save = []
+
+            with data_lock:
+                all_tokens = set(local_books.keys()) | set(market_stats.keys())
+
+                for clean_token in all_tokens:
+                    book = local_books.get(clean_token)
+                    stats = market_stats.get(clean_token, {})
+
+                    if not book or not book.get('bids') or not book.get('asks'):
+                        continue
+
+                    try:
+                        best_bid = max(book['bids'].keys())
+                        best_ask = min(book['asks'].keys())
+                    except ValueError:
+                        continue
+
+                    if best_bid == 0 or best_ask == 0: continue
+
+                    spread = ((best_ask - best_bid) / best_bid) * 100
+
+                    price_calc = stats.get('mark_price', 0)
+                    if price_calc == 0: price_calc = (best_bid + best_ask) / 2
+
+                    oi_usd = stats.get('oi_contracts', 0) * 2 * price_calc
+
+                    data_to_save.append({
+                        'Token': clean_token,
+                        'Bid': best_bid,
+                        'Ask': best_ask,
+                        'Spread %': spread,
+                        'Funding %': stats.get('funding', 0.0),
+                        'Freq (h)': 1,
+                        'OI ($)': oi_usd,
+                        'Volume 24h ($)': stats.get('vol', 0.0)
+                    })
+
+            if data_to_save:
+                conn = sqlite3.connect(DB_PATH, timeout=5)
+                cursor = conn.cursor()
+                ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+                for row in data_to_save:
                     cursor.execute('''
-                        INSERT INTO market_data 
+                        INSERT OR REPLACE INTO market_data 
                         (token, bid, ask, spread_pct, funding_pct, freq_hours, oi_usd, volume_24h, last_updated)
-                        VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (
                         row['Token'], row['Bid'], row['Ask'], row['Spread %'],
-                        row['Funding %'], row['Freq (h)'], timestamp
+                        row['Funding %'], row['Freq (h)'], row['OI ($)'],
+                        row['Volume 24h ($)'], ts
                     ))
 
-        conn.commit()
+                conn.commit()
+                conn.execute('PRAGMA wal_checkpoint(PASSIVE);')
+                conn.close()
+
+                print(f"{C.CYAN}[{ts.split()[1]}] Backpack (WSS): оновив {len(data_to_save)} токенів.{C.END}")
+
+        except Exception as e:
+            print(f"{C.RED}❌ DB Loop Error: {e}{C.END}")
+            time.sleep(1)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 🌐 WEBSOCKET LOGIC
+# ═══════════════════════════════════════════════════════════════════════════
+
+def get_perp_symbols():
+    try:
+        r = requests.get(f"{REST_API_URL}/markets", timeout=10)
+        data = r.json()
+        perps = [m['symbol'] for m in data if m.get('marketType') == 'PERP']
+        return perps
+    except:
+        return []
+
+
+def on_message(ws, message):
+    try:
+        payload = json.loads(message)
+        data = payload.get('data')
+        if not data: return
+
+        raw_symbol = data.get('s')
+        event_type = data.get('e')
+
+        if not raw_symbol or not event_type: return
+
+        clean_symbol = get_clean_symbol(raw_symbol)
+
+        with data_lock:
+            if clean_symbol not in market_stats: market_stats[clean_symbol] = {}
+            if clean_symbol not in local_books: local_books[clean_symbol] = {'bids': {}, 'asks': {}}
+
+            if event_type == 'depth':
+                for item in data.get('b', []):
+                    price = float(item[0])
+                    qty = float(item[1])
+                    if qty == 0:
+                        local_books[clean_symbol]['bids'].pop(price, None)
+                    else:
+                        local_books[clean_symbol]['bids'][price] = qty
+
+                for item in data.get('a', []):
+                    price = float(item[0])
+                    qty = float(item[1])
+                    if qty == 0:
+                        local_books[clean_symbol]['asks'].pop(price, None)
+                    else:
+                        local_books[clean_symbol]['asks'][price] = qty
+
+            elif event_type == 'ticker':
+                market_stats[clean_symbol]['vol'] = float(data.get('V', 0))
+
+            elif event_type == 'markPrice':
+                market_stats[clean_symbol]['mark_price'] = float(data.get('p', 0))
+                if 'f' in data:
+                    market_stats[clean_symbol]['funding'] = float(data['f']) * 100
+
+            elif event_type == 'openInterest':
+                market_stats[clean_symbol]['oi_contracts'] = float(data.get('o', 0))
+
     except Exception as e:
-        print(f"{C.RED}❌ DB Error: {e}{C.END}")
-    finally:
-        conn.close()
+        pass
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 📡 API ФУНКЦІЇ
-# ═══════════════════════════════════════════════════════════════════════════
-
-def get_json(url, params=None, retries=3):
-    for i in range(retries):
-        try:
-            response = requests.get(url, params=params, headers=HEADERS, timeout=10)
-            if response.status_code == 429:
-                time.sleep(1 + i)
-                continue
-            response.raise_for_status()
-            return response.json()
-        except Exception:
-            if i == retries - 1: return None
-            time.sleep(0.5)
-    return None
+def on_error(ws, error):
+    if str(error):
+        print(f"\n{C.RED}⚠️ WSS Error: {error}{C.END}")
 
 
-def fetch_pair_data(symbol, ticker_data, full_update=False):
-    # 1. СТАКАН
-    depth = get_json(f"{API_BASE}/depth", params={'symbol': symbol, 'limit': 5})
-    bid, ask = 0.0, 0.0
-    if depth:
-        try:
-            bids = depth.get('bids', [])
-            asks = depth.get('asks', [])
-            if bids: bid = float(bids[0][0])
-            if asks: ask = float(asks[0][0])
-        except:
-            pass
+def on_close(ws, close_status_code, close_msg):
+    print(f"\n{C.YELLOW}🔌 WSS Closed. Reconnecting in 3s...{C.END}")
+    time.sleep(3)
+    with data_lock:
+        local_books.clear()
+        print(f"{C.YELLOW}🧹 Cleared orderbooks.{C.END}")
 
-        # 2. FUNDING
-    funding_res = get_json(f"{API_BASE}/fundingRates", params={'symbol': symbol, 'limit': 2})
-    funding_pct = 0.0
-    freq_hours = 1
 
-    if funding_res and len(funding_res) > 0:
-        funding_pct = float(funding_res[0].get('fundingRate', 0)) * 100
-        if len(funding_res) >= 2:
+def on_open(ws):
+    print(f"{C.GREEN}✅ WSS Connected! Subscribing...{C.END}")
+
+    def subscribe_slowly():
+        streams = []
+        for sym in symbols_map:
+            streams.append(f"depth.{sym}")
+            streams.append(f"ticker.{sym}")
+            streams.append(f"markPrice.{sym}")
+            streams.append(f"openInterest.{sym}")
+
+            # 🔥 ЗМЕНШЕНИЙ ЧАНК: По 10 стрімів (дуже обережно)
+        chunk_size = 10
+        total_chunks = len(streams) // chunk_size + 1
+
+        for i in range(0, len(streams), chunk_size):
+            chunk = streams[i:i + chunk_size]
+            if not chunk: continue
+
+            payload = {"method": "SUBSCRIBE", "params": chunk}
             try:
-                t1 = datetime.fromisoformat(funding_res[0]['intervalEndTimestamp'])
-                t2 = datetime.fromisoformat(funding_res[1]['intervalEndTimestamp'])
-                freq_hours = int((t1 - t2).total_seconds() / 3600)
+                ws.send(json.dumps(payload))
             except:
-                pass
+                break
 
-    # 3. OI & VOLUME (Тільки якщо full_update)
-    oi_usd = 0.0
-    volume_usd = 0.0
+            # 🔥 ЗБІЛЬШЕНА ПАУЗА: 1 секунда між пакетами
+            # Це дає серверу час "переварити" підписку і не розірвати з'єднання
+            time.sleep(1.0)
 
-    if full_update:
-        oi_res = get_json(f"{API_BASE}/openInterest", params={'symbol': symbol})
-        oi_tokens = 0.0
-        if oi_res:
-            if isinstance(oi_res, list) and len(oi_res) > 0:
-                oi_tokens = float(oi_res[0].get('openInterest', 0))
-            elif isinstance(oi_res, dict):
-                oi_tokens = float(oi_res.get('openInterest', 0))
+            print(f"\r⏳ Subscribing... {i}/{len(streams)} streams sent", end="", flush=True)
 
-        last_price = float(ticker_data.get('lastPrice', 0))
-        oi_usd = oi_tokens * last_price
-        volume_usd = float(ticker_data.get('quoteVolume', 0))
+        print(f"\n{C.GREEN}✅ All subscriptions sent.{C.END}")
 
-    spread = 0.0
-    if bid > 0:
-        spread = ((ask - bid) / bid) * 100
+    threading.Thread(target=subscribe_slowly).start()
 
-    return {
-        'Token': symbol.replace('_USDC_PERP', ''),
-        'Bid': bid,
-        'Ask': ask,
-        'Spread %': spread,
-        'Funding %': funding_pct,
-        'Freq (h)': freq_hours,
-        'OI ($)': oi_usd,
-        'Volume 24h ($)': volume_usd
-    }
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 🚀 MAIN LOOP
-# ═══════════════════════════════════════════════════════════════════════════
 
 def main():
-    print(f"\n{C.CYAN}🚀 BACKPACK MONITOR STARTED{C.END}")
-    print(f"{C.YELLOW}📂 DB Path: {DB_PATH}{C.END}")
+    global symbols_map
+    print(f"\n{C.CYAN}🚀 BACKPACK WSS MONITOR (SLOW START MODE){C.END}")
 
     init_db()
+    symbols_map = get_perp_symbols()
 
-    last_slow_update = 0
-    first_run = True  # Прапор для першого запуску
+    if not symbols_map:
+        print(f"{C.RED}❌ No PERP symbols found.{C.END}")
+        return
+
+    db_thread = threading.Thread(target=update_db_loop, daemon=True)
+    db_thread.start()
 
     while True:
         try:
-            current_time = time.time()
-            is_full_update = (current_time - last_slow_update) >= UPDATE_INTERVAL_SLOW
-
-            # Лог про початок сканування (тільки якщо перший раз, інакше мовчимо)
-            if first_run:
-                print(f"{C.BOLD}🔄 Initial Scan (Full Data)...{C.END}")
-
-            markets = get_json(f"{API_BASE}/markets")
-            tickers = get_json(f"{API_BASE}/tickers")
-
-            if not markets or not tickers:
-                print(f"{C.RED}⚠️ API Error. Retrying in 5s...{C.END}")
-                time.sleep(5)
-                continue
-
-            ticker_map = {t['symbol']: t for t in tickers}
-            perp_symbols = [m['symbol'] for m in markets if m.get('marketType') == 'PERP']
-
-            results = []
-
-            # Сканування
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-                future_to_symbol = {
-                    executor.submit(fetch_pair_data, sym, ticker_map.get(sym, {}), is_full_update): sym
-                    for sym in perp_symbols
-                }
-
-                completed = 0
-                for future in concurrent.futures.as_completed(future_to_symbol):
-                    data = future.result()
-                    results.append(data)
-                    completed += 1
-                    # Показувати прогрес бар ТІЛЬКИ при першому запуску
-                    if first_run:
-                        print(f"\r⏳ Scanning: {completed}/{len(perp_symbols)}", end="", flush=True)
-
-            # Збереження
-            save_to_db(results, is_full_update)
-
-            if is_full_update:
-                last_slow_update = time.time()
-
-            # --- ЛОГІКА ВИВОДУ ---
-            ts = datetime.now().strftime('%H:%M:%S')
-
-            if first_run:
-                # ПЕРШИЙ ЗАПУСК: Виводимо таблицю
-                print("\n")
-                df = pd.DataFrame(results)
-                df = df.sort_values(by='Volume 24h ($)', ascending=False)
-                cols = ['Token', 'Bid', 'Ask', 'Spread %', 'Funding %', 'Freq (h)', 'OI ($)', 'Volume 24h ($)']
-
-                print("=" * 130)
-                print(f"{C.BOLD}📊 INITIAL DATA (Top 10){C.END}")
-                print(df[cols].head(10).to_string(index=False))
-                print("=" * 130)
-                print(f"{C.GREEN}✅ First run complete. Switching to monitoring mode.{C.END}\n")
-                first_run = False
-            else:
-                # НАСТУПНІ ЗАПУСКИ: Короткий лог
-                print(f"{C.CYAN}[{ts}] Backpack: оновив {len(results)} токенів.{C.END}")
-
-            time.sleep(UPDATE_INTERVAL_FAST)
-
-        except KeyboardInterrupt:
-            print(f"\n{C.RED}🛑 Stopped by user{C.END}")
-            break
-        except Exception as e:
-            # Цей рядок обов'язково залишаємо, щоб бачити критичні помилки
-            print(f"\n{C.RED}❌ Critical Error: {e}{C.END}")
+            ws = websocket.WebSocketApp(
+                WS_URL,
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close
+            )
+            # 🔥 ПОВЕРНУЛИ ПІНГ, АЛЕ М'ЯКИЙ
+            # Інтервал 25с (щоб NAT не вбивав), Таймаут 20с (щоб не панікувати)
+            ws.run_forever(ping_interval=25, ping_timeout=20)
+        except Exception:
             time.sleep(5)
 
 

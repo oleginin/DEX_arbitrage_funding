@@ -42,6 +42,22 @@ pd.set_option('display.float_format', '{:,.4f}'.format)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 🕒 ФУНКЦІЯ СИНХРОНІЗАЦІЇ (НОВЕ)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def wait_for_next_cycle(interval=15):
+    """
+    Чекає до наступної "рівної" секунди (00, 15, 30, 45).
+    """
+    now = time.time()
+    next_ts = (int(now) // interval + 1) * interval
+    sleep_time = next_ts - now
+
+    if sleep_time > 0:
+        time.sleep(sleep_time)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 🗄️ БАЗА ДАНИХ
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -169,9 +185,6 @@ def fetch_variational_data():
                 spread = ((ask - bid) / bid) * 100
 
             # 3. Funding Rate (BPS -> %)
-            # В API: -10.41 (це bps)
-            # Ми хочемо: -0.1041 (це %)
-            # Формула: bps / 100
             funding_bps = float(item.get('funding_rate', 0))
             funding_pct = funding_bps / 100.0
 
@@ -210,7 +223,7 @@ def fetch_variational_data():
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main():
-    print(f"\n{C.CYAN}🚀 VARIATIONAL MONITOR (BPS FIXED){C.END}")
+    print(f"\n{C.CYAN}🚀 VARIATIONAL MONITOR (SYNCED){C.END}")
     print(f"{C.YELLOW}📂 DB Path: {DB_PATH}{C.END}")
 
     init_db()
@@ -219,6 +232,9 @@ def main():
     first_run = True
 
     while True:
+        # 🔥 1. СИНХРОНІЗАЦІЯ: Чекаємо старту циклу
+        wait_for_next_cycle(UPDATE_INTERVAL_FAST)
+
         try:
             current_time = time.time()
             is_full_update = (current_time - last_slow_update) >= UPDATE_INTERVAL_SLOW
@@ -226,13 +242,14 @@ def main():
             if first_run:
                 print(f"{C.BOLD}🔄 Fetching Data...{C.END}")
 
+            # 🔥 2. ОТРИМАННЯ ДАНИХ (Синхронно)
             data_list = fetch_variational_data()
 
             if not data_list:
-                print(f"{C.RED}⚠️ No data. Retrying...{C.END}")
-                time.sleep(5)
+                print(f"{C.RED}⚠️ No data. Retrying next cycle...{C.END}")
                 continue
 
+            # 🔥 3. ЗБЕРЕЖЕННЯ
             save_to_db(data_list, is_full_update)
 
             if is_full_update:
@@ -241,14 +258,12 @@ def main():
             ts = datetime.now().strftime('%H:%M:%S')
 
             if first_run:
-                # ПЕРШИЙ ЗАПУСК: Таблиця
                 print(f"{C.GREEN}✅ Monitor Active. Pairs: {len(data_list)}{C.END}\n")
                 first_run = False
             else:
-                # НАСТУПНІ ЗАПУСКИ: Короткий лог
                 print(f"{C.CYAN}[{ts}] Variational: оновив {len(data_list)} токенів.{C.END}")
 
-            time.sleep(UPDATE_INTERVAL_FAST)
+            # time.sleep більше не потрібен
 
         except KeyboardInterrupt:
             print(f"\n{C.RED}🛑 Stopped{C.END}")

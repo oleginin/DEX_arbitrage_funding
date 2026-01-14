@@ -20,7 +20,7 @@ DB_NAME = 'paradex_database.db'
 DB_PATH = os.path.join(DB_FOLDER, DB_NAME)
 
 # --- ТАЙМЕРИ ---
-UPDATE_INTERVAL_FAST = 15
+UPDATE_INTERVAL_FAST = 15  # Інтервал синхронізації
 UPDATE_INTERVAL_SLOW = 3600
 
 HEADERS = {
@@ -41,6 +41,22 @@ class C:
 pd.set_option('display.max_rows', None)
 pd.set_option('display.width', 250)
 pd.set_option('display.float_format', '{:,.4f}'.format)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 🕒 ФУНКЦІЯ СИНХРОНІЗАЦІЇ (НОВЕ)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def wait_for_next_cycle(interval=15):
+    """
+    Чекає до наступної "рівної" секунди (00, 15, 30, 45).
+    """
+    now = time.time()
+    next_ts = (int(now) // interval + 1) * interval
+    sleep_time = next_ts - now
+
+    if sleep_time > 0:
+        time.sleep(sleep_time)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -205,7 +221,7 @@ def fetch_pair_summary(symbol, freq):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main():
-    print(f"\n{C.CYAN}🚀 PARADEX MONITOR STARTED (MULTI-THREADED){C.END}")
+    print(f"\n{C.CYAN}🚀 PARADEX MONITOR STARTED (SYNCED){C.END}")
 
     init_db()
 
@@ -225,6 +241,9 @@ def main():
     symbols = list(freq_map.keys())
 
     while True:
+        # 🔥 1. СИНХРОНІЗАЦІЯ: Чекаємо старту циклу
+        wait_for_next_cycle(UPDATE_INTERVAL_FAST)
+
         try:
             current_time = time.time()
             is_full_update = (current_time - last_slow_update) >= UPDATE_INTERVAL_SLOW
@@ -234,9 +253,9 @@ def main():
 
             results = []
 
+            # 🔥 2. ОТРИМАННЯ ДАНИХ (Починається синхронно)
             # Багатопотоковий запуск (20 потоків)
             with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-                # Створюємо завдання
                 future_to_symbol = {
                     executor.submit(fetch_pair_summary, sym, freq_map[sym]): sym
                     for sym in symbols
@@ -255,10 +274,10 @@ def main():
 
             if not results:
                 print(f"\n{C.RED}⚠️ No data fetched. API might be blocking or down.{C.END}")
-                time.sleep(5)
+                # Якщо API лежить, чекаємо наступного циклу, не спимо вручну
                 continue
 
-            # Запис в БД
+            # 🔥 3. ЗБЕРЕЖЕННЯ
             save_to_db(results, is_full_update)
 
             if is_full_update:
@@ -268,14 +287,12 @@ def main():
             ts = datetime.now().strftime('%H:%M:%S')
 
             if first_run:
-
                 print(f"{C.GREEN}✅ Monitor Active.{C.END}\n")
                 first_run = False
             else:
-                # НАСТУПНІ ЗАПУСКИ: Короткий лог
                 print(f"{C.CYAN}[{ts}] Paradex: оновив {len(results)} токенів.{C.END}")
 
-            time.sleep(UPDATE_INTERVAL_FAST)
+            # time.sleep більше не потрібен
 
         except KeyboardInterrupt:
             print(f"\n{C.RED}🛑 Stopped{C.END}")

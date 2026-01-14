@@ -19,7 +19,7 @@ DB_NAME = 'extended_database.db'
 DB_PATH = os.path.join(DB_FOLDER, DB_NAME)
 
 # --- ТАЙМЕРИ ---
-UPDATE_INTERVAL_FAST = 15
+UPDATE_INTERVAL_FAST = 15  # Інтервал оновлення (секунди)
 UPDATE_INTERVAL_SLOW = 3600
 
 HEADERS = {
@@ -40,6 +40,22 @@ class C:
 pd.set_option('display.max_rows', None)
 pd.set_option('display.width', 250)
 pd.set_option('display.float_format', '{:,.5f}'.format)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 🕒 ФУНКЦІЯ СИНХРОНІЗАЦІЇ (НОВЕ)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def wait_for_next_cycle(interval=15):
+    """
+    Чекає до наступної "рівної" секунди (00, 15, 30, 45).
+    """
+    now = time.time()
+    next_ts = (int(now) // interval + 1) * interval
+    sleep_time = next_ts - now
+
+    if sleep_time > 0:
+        time.sleep(sleep_time)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -81,13 +97,8 @@ def save_to_db(data_list, is_full_update):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     try:
-        # Єдина логіка для обох типів оновлення:
-        # 1. Пробуємо ОНОВИТИ існуючий запис (UPDATE)
-        # 2. Якщо запису немає -> СТВОРЮЄМО новий (INSERT)
-
         for row in data_list:
             if is_full_update:
-                # Повне оновлення (всі поля)
                 cursor.execute('''
                     UPDATE market_data 
                     SET bid=?, ask=?, spread_pct=?, funding_pct=?, freq_hours=?, oi_usd=?, volume_24h=?, last_updated=?
@@ -98,7 +109,6 @@ def save_to_db(data_list, is_full_update):
                     row['Volume 24h ($)'], timestamp, row['Token']
                 ))
 
-                # Якщо UPDATE нічого не змінив (рядків 0), значить токена немає - робимо INSERT
                 if cursor.rowcount == 0:
                     cursor.execute('''
                         INSERT INTO market_data 
@@ -111,7 +121,6 @@ def save_to_db(data_list, is_full_update):
                     ))
 
             else:
-                # Швидке оновлення (Тільки ціна і фандінг, OI/Vol не чіпаємо)
                 cursor.execute('''
                     UPDATE market_data 
                     SET bid=?, ask=?, spread_pct=?, funding_pct=?, freq_hours=?, last_updated=?
@@ -121,7 +130,6 @@ def save_to_db(data_list, is_full_update):
                     row['Funding %'], row['Freq (h)'], timestamp, row['Token']
                 ))
 
-                # Якщо нового токена ще немає, вставляємо його з нульовими OI/Vol
                 if cursor.rowcount == 0:
                     cursor.execute('''
                         INSERT INTO market_data 
@@ -159,49 +167,36 @@ def get_json(url, retries=3):
 
 
 def fetch_extended_data():
-    # Отримуємо ВСІ маркети одним запитом
     raw_response = get_json(API_URL)
 
     if not raw_response:
         return []
 
-    # Перевірка успішності запиту
     if raw_response.get('status') != 'OK':
         print(f"{C.YELLOW}⚠️ API returned status: {raw_response.get('status')}{C.END}")
         return []
 
-    # Список токенів лежить у 'data'
     markets = raw_response.get('data', [])
-
     results = []
 
     for m in markets:
         try:
-            # 1. Фільтр: Тільки активні
-            if m.get('status') != 'ACTIVE':
-                continue
+            if m.get('status') != 'ACTIVE': continue
 
             stats = m.get('marketStats', {})
-            raw_ticker = m.get('name')  # Приходить наприклад "ENA-USD"
-
-            # 🔥 ВИПРАВЛЕННЯ НАЗВИ 🔥
-            # Видаляємо "-USD" з кінця, якщо воно там є
+            raw_ticker = m.get('name')
             ticker = raw_ticker.replace('-USD', '')
 
-            # 2. Ціни
             bid = float(stats.get('bidPrice', 0))
             ask = float(stats.get('askPrice', 0))
 
-            # 3. Spread
             spread = 0.0
             if bid > 0:
                 spread = ((ask - bid) / bid) * 100
 
-            # 4. Фандінг (множимо на 100, бо це 1-годинна ставка)
             funding_raw = float(stats.get('fundingRate', 0))
             funding_pct = funding_raw * 100.0
 
-            # 5. OI & Volume (Вже в USD)
             oi_usd = float(stats.get('openInterest', 0))
             vol_usd = float(stats.get('dailyVolume', 0))
 
@@ -211,7 +206,7 @@ def fetch_extended_data():
                 'Ask': ask,
                 'Spread %': spread,
                 'Funding %': funding_pct,
-                'Freq (h)': 1,  # Extended має 1-годинний фандінг
+                'Freq (h)': 1,
                 'OI ($)': oi_usd,
                 'Volume 24h ($)': vol_usd
             })
@@ -227,7 +222,7 @@ def fetch_extended_data():
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main():
-    print(f"\n{C.CYAN}🚀 EXTENDED EXCHANGE MONITOR{C.END}")
+    print(f"\n{C.CYAN}🚀 EXTENDED EXCHANGE MONITOR (SYNCED){C.END}")
     print(f"{C.YELLOW}📂 DB Path: {DB_PATH}{C.END}")
 
     init_db()
@@ -236,6 +231,9 @@ def main():
     first_run = True
 
     while True:
+        # 🔥 1. СИНХРОНІЗАЦІЯ: Чекаємо старту циклу
+        wait_for_next_cycle(UPDATE_INTERVAL_FAST)
+
         try:
             current_time = time.time()
             is_full_update = (current_time - last_slow_update) >= UPDATE_INTERVAL_SLOW
@@ -243,13 +241,14 @@ def main():
             if first_run:
                 print(f"{C.BOLD}🔄 Fetching Data...{C.END}")
 
+            # 🔥 2. ОТРИМАННЯ ДАНИХ (Починається синхронно)
             data_list = fetch_extended_data()
 
             if not data_list:
-                print(f"{C.RED}⚠️ No data fetched. Retrying in 5s...{C.END}")
-                time.sleep(5)
+                print(f"{C.RED}⚠️ No data fetched. Retrying next cycle...{C.END}")
                 continue
 
+            # 🔥 3. ЗБЕРЕЖЕННЯ
             save_to_db(data_list, is_full_update)
 
             if is_full_update:
@@ -258,14 +257,12 @@ def main():
             ts = datetime.now().strftime('%H:%M:%S')
 
             if first_run:
-                # ПЕРШИЙ ЗАПУСК
                 print(f"{C.GREEN}✅ Monitor Active. Pairs found: {len(data_list)}{C.END}\n")
                 first_run = False
             else:
-                # НАСТУПНІ ЗАПУСКИ
                 print(f"{C.CYAN}[{ts}] Extended: оновив {len(data_list)} токенів.{C.END}")
 
-            time.sleep(UPDATE_INTERVAL_FAST)
+            # time.sleep більше не потрібен
 
         except KeyboardInterrupt:
             print(f"\n{C.RED}🛑 Stopped{C.END}")

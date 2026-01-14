@@ -44,17 +44,15 @@ def run_monitor(target_func, name):
     except KeyboardInterrupt:
         pass
     except Exception as e:
-        # Логуємо помилку, щоб знати, чому процес впав
         print(f"{C.RED}❌ Process {name} crashed: {e}{C.END}")
 
 
 if __name__ == "__main__":
+    # Для Windows це важливо, щоб уникнути рекурсивного запуску
     multiprocessing.freeze_support()
 
-    print(f"\n{C.BOLD}{C.CYAN}🚀 LAUNCHING ALL EXCHANGE MONITORS...{C.END}")
+    print(f"\n{C.BOLD}{C.CYAN}🚀 LAUNCHING ALL EXCHANGE MONITORS (SYNC MODE)...{C.END}")
 
-    # Список: (Функція, Назва, Час останнього падіння для захисту від спаму)
-    # Третій елемент 0 — це timestamp останнього рестарту
     monitors_config = [
         {"func": backpack_monitor.main, "name": "Backpack", "last_restart": 0},
         {"func": paradex_monitor.main, "name": "Paradex", "last_restart": 0},
@@ -65,8 +63,6 @@ if __name__ == "__main__":
 
     processes = [None] * len(monitors_config)
 
-
-    # Функція для запуску конкретного процесу за індексом
     def start_process(index):
         cfg = monitors_config[index]
         p = multiprocessing.Process(target=run_monitor, args=(cfg["func"], cfg["name"]))
@@ -75,19 +71,18 @@ if __name__ == "__main__":
         print(f"{C.GREEN}✅ Started: {cfg['name']} (PID: {p.pid}){C.END}")
         return p
 
-
-    # Первинний запуск
+    # 🔥 ЗАПУСК: Запускаємо все максимально швидко, без затримок
+    # Монітори самі "сплять" всередині завдяки wait_for_next_cycle()
     for i in range(len(monitors_config)):
         start_process(i)
-        time.sleep(0.5)  # Невелика пауза між стартами, щоб не пікувати CPU
+        # time.sleep(0.5) <--- ПРИБРАЛИ, щоб всі встигли на найближчий цикл
 
-    print(f"\n{C.YELLOW}⚡ All systems active. CPU Monitor: optimized.{C.END}")
+    print(f"\n{C.YELLOW}⚡ All systems active. Waiting for sync cycle (:00, :15, :30, :45)...{C.END}")
     print(f"{C.YELLOW}🛑 Press Ctrl+C to stop.{C.END}\n")
 
     try:
         while True:
-            # 1. Збільшуємо інтервал перевірки.
-            # Головному процесу достатньо прокидатися раз на 5-10 секунд.
+            # Перевіряємо статус процесів кожні 5 секунд
             time.sleep(5)
 
             for i, p in enumerate(processes):
@@ -95,11 +90,10 @@ if __name__ == "__main__":
                     cfg = monitors_config[i]
                     name = cfg["name"]
 
-                    # 2. Логіка захисту від швидкого перезапуску (Backoff)
+                    # Захист від циклічного перезапуску (Backoff)
                     current_time = time.time()
                     if current_time - cfg["last_restart"] < 10:
-                        # Якщо впав швидше ніж за 10 секунд після старту, чекаємо
-                        print(f"{C.RED}⚠️ {name} keeps crashing. Waiting before restart...{C.END}")
+                        print(f"{C.RED}⚠️ {name} keeps crashing. Waiting 5s before restart...{C.END}")
                         time.sleep(5)
 
                     print(f"{C.YELLOW}🔄 Restarting {name}...{C.END}")
