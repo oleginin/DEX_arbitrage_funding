@@ -10,14 +10,16 @@ from contextlib import closing
 # ═══════════════════════════════════════════════════════════════════════════
 
 PAUSE_AFTER_UPDATE = 15
-RESET_HISTORY_ON_START = True
+RESET_HISTORY_ON_START = False
 STATS_WARMUP_SEC = 60
 
-# 🔥 ТЕПЕР МИ ПИШЕМО ВСЕ (НАВІТЬ МІНУСИ)
-# Ми прибрали фільтри ігнорування.
-# Min/Max будуть рахуватися чесно по всій історії.
+# 📅 ІСТОРІЯ
+HISTORY_RETENTION_DAYS = 8
 
-# 🛑 ФІЛЬТРИ (Вимкнені, щоб бачити всі маршрути)
+# 👶 НОВІ ТОКЕНИ
+NEW_TOKEN_GRACE_PERIOD_HOURS = 24
+
+# 🛑 ФІЛЬТРИ (Застосовуються тільки до "старих" токенів)
 MIN_OI_USD = 50000
 MIN_VOL_USD = 500000
 
@@ -54,7 +56,7 @@ class C:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 🛠️ ІНІЦІАЛІЗАЦІЯ
+# 🛠️ РОБОТА З БАЗОЮ ДАНИХ (TARGET DB)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def init_target_db():
@@ -75,12 +77,17 @@ def init_target_db():
                 buy_price REAL,
                 sell_price REAL,
                 spread_pct REAL,
+
                 spread_min_24h REAL,
                 spread_max_24h REAL,
                 spread_min_30d REAL,
                 spread_max_30d REAL,
-                net_funding_pct REAL,
-                funding_freq TEXT,
+
+                buy_funding_rate REAL,
+                buy_funding_freq INTEGER,
+                sell_funding_rate REAL,
+                sell_funding_freq INTEGER,
+
                 oi_long_usd REAL,
                 oi_short_usd REAL,
                 vol_long_usd REAL,
@@ -100,25 +107,61 @@ def init_target_db():
             )
         ''')
 
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS token_discovery (
+                token TEXT PRIMARY KEY,
+                discovery_time TIMESTAMP
+            )
+        ''')
+
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_hist_token_route ON spread_history (token, route);')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_hist_time ON spread_history (timestamp);')
 
         conn.commit()
 
         if RESET_HISTORY_ON_START:
-            try:
-                cursor.execute("DELETE FROM spread_history")
-                conn.commit()
-                cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-                print(f"{C.RED}🧹 History CLEARED & WAL Truncated.{C.END}")
-            except Exception as e:
-                print(f"⚠️ Clean error: {e}")
+            cursor.execute("DELETE FROM spread_history")
+            conn.commit()
+            print(f"{C.RED}🧹 History CLEARED.{C.END}")
 
     print(f"{C.GREEN}✅ Target DB Initialized.{C.END}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 📥 ЧИТАННЯ
+# 👶 УПРАВЛІННЯ НОВИМИ ТОКЕНАМИ
+# ═══════════════════════════════════════════════════════════════════════════
+
+def manage_new_tokens(current_tokens):
+    if not current_tokens: return {}
+    discovery_map = {}
+    try:
+        with closing(sqlite3.connect(TARGET_DB_PATH, timeout=10)) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT token, discovery_time FROM token_discovery")
+            rows = cursor.fetchall()
+            known_tokens = {row[0]: pd.to_datetime(row[1]) for row in rows}
+
+            new_tokens = []
+            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+            for t in current_tokens:
+                if t not in known_tokens:
+                    new_tokens.append((t, now_str))
+                    known_tokens[t] = datetime.now()
+
+            if new_tokens:
+                cursor.executemany("INSERT OR IGNORE INTO token_discovery (token, discovery_time) VALUES (?, ?)",
+                                   new_tokens)
+                conn.commit()
+                print(f"{C.YELLOW}👶 Discovered {len(new_tokens)} new tokens! Filters disabled for 24h.{C.END}")
+            discovery_map = known_tokens
+    except Exception as e:
+        print(f"{C.RED}❌ Token Discovery Error: {e}{C.END}")
+    return discovery_map
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 📥 ЧИТАННЯ З ДЖЕРЕЛ
 # ═══════════════════════════════════════════════════════════════════════════
 
 def get_data_from_source(db_config):
@@ -128,12 +171,16 @@ def get_data_from_source(db_config):
     try:
         with closing(sqlite3.connect(db_path, timeout=10, isolation_level=None)) as conn:
             conn.execute('PRAGMA journal_mode=WAL;')
-            conn.execute('PRAGMA wal_checkpoint(PASSIVE);')
-
             query = "SELECT * FROM market_data"
             df = pd.read_sql_query(query, conn)
 
             if df.empty: return None
+
+            df.rename(columns={
+                'funding_rate': 'funding_pct',
+                'fundingRate': 'funding_pct',
+                'predicted_funding_rate': 'funding_pct'
+            }, inplace=True)
 
             df['last_updated'] = pd.to_datetime(df['last_updated'])
             cutoff_time = datetime.now() - timedelta(seconds=MAX_DATA_DELAY_SEC)
@@ -153,32 +200,50 @@ def get_data_from_source(db_config):
 # 🧠 РОЗРАХУНОК
 # ═══════════════════════════════════════════════════════════════════════════
 
-def get_effective_funding(row):
-    exch = row['exchange']
-    raw_fund = row['funding_pct']
-    freq = max(1, row['freq_hours'])
-    if exch == 'Variational':
-        return (raw_fund * freq), freq
-    else:
-        return raw_fund, freq
+def get_period_funding(row):
+    """
+    Рахує реальний фандінг за період.
+    """
+    try:
+        rate = float(row['funding_pct'])
+        freq = max(1, int(row['freq_hours']))
+
+        # 🔥 ВИПРАВЛЕНО: Множимо ТІЛЬКИ для Variational
+        if row['exchange'] == 'Variational':
+            return rate * freq
+        else:
+            return rate
+    except:
+        return 0.0
 
 
-def calculate_live_routes(all_data_df):
+def calculate_live_routes(all_data_df, discovery_map):
     if all_data_df.empty: return pd.DataFrame()
     results = []
     grouped = all_data_df.groupby('token')
+    current_time = datetime.now()
 
     for token, group in grouped:
         if len(group) < 2: continue
+
+        is_new_token = False
+        if token in discovery_map:
+            discovery_time = discovery_map[token]
+            hours_since_discovery = (current_time - discovery_time).total_seconds() / 3600
+            if hours_since_discovery < NEW_TOKEN_GRACE_PERIOD_HOURS:
+                is_new_token = True
 
         potential_buys = group[group['ask'] > 0]
         potential_sells = group[group['bid'] > 0]
 
         for _, buy_row in potential_buys.iterrows():
-            if buy_row['oi_usd'] < MIN_OI_USD or buy_row['volume_24h'] < MIN_VOL_USD: continue
+            if not is_new_token:
+                if buy_row['oi_usd'] < MIN_OI_USD or buy_row['volume_24h'] < MIN_VOL_USD: continue
 
             for _, sell_row in potential_sells.iterrows():
-                if sell_row['oi_usd'] < MIN_OI_USD or sell_row['volume_24h'] < MIN_VOL_USD: continue
+                if not is_new_token:
+                    if sell_row['oi_usd'] < MIN_OI_USD or sell_row['volume_24h'] < MIN_VOL_USD: continue
+
                 if buy_row['exchange'] == sell_row['exchange']: continue
 
                 time_diff = abs((buy_row['last_updated'] - sell_row['last_updated']).total_seconds())
@@ -189,16 +254,10 @@ def calculate_live_routes(all_data_df):
 
                 spread = ((sell_price - buy_price) / buy_price) * 100
 
-                fund_long_pct, freq_long = get_effective_funding(buy_row)
-                fund_short_pct, freq_short = get_effective_funding(sell_row)
-
-                hourly_long = fund_long_pct / freq_long
-                hourly_short = fund_short_pct / freq_short
-                max_freq = max(freq_long, freq_short)
-                net_funding_scaled = (hourly_short - hourly_long) * max_freq
-
-                freq_str = f"{int(freq_long)}h / {int(freq_short)}h"
                 route_name = f"{buy_row['exchange']} ➡️ {sell_row['exchange']}"
+
+                buy_fund_period = get_period_funding(buy_row)
+                sell_fund_period = get_period_funding(sell_row)
 
                 results.append({
                     'token': token,
@@ -208,8 +267,10 @@ def calculate_live_routes(all_data_df):
                     'buy_price': buy_price,
                     'sell_price': sell_price,
                     'spread': spread,
-                    'net_funding': net_funding_scaled,
-                    'funding_freq_str': freq_str,
+                    'buy_funding_rate': buy_fund_period,
+                    'buy_funding_freq': int(buy_row['freq_hours']),
+                    'sell_funding_rate': sell_fund_period,
+                    'sell_funding_freq': int(sell_row['freq_hours']),
                     'oi_long': buy_row['oi_usd'],
                     'oi_short': sell_row['oi_usd'],
                     'vol_long': buy_row['volume_24h'],
@@ -220,7 +281,7 @@ def calculate_live_routes(all_data_df):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 💾 СТАТИСТИКА (БЕЗ ФІЛЬТРІВ)
+# 💾 СТАТИСТИКА
 # ═══════════════════════════════════════════════════════════════════════════
 
 def update_history_and_get_stats(df_live):
@@ -235,7 +296,6 @@ def update_history_and_get_stats(df_live):
             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
             for _, row in df_live.iterrows():
-                # 🔥 МИ БІЛЬШЕ НЕ ІГНОРУЄМО НІЧОГО. Пишемо і плюси, і мінуси.
                 history_data.append((row['token'], row['route'], row['spread'], now_str))
 
             if history_data:
@@ -244,7 +304,8 @@ def update_history_and_get_stats(df_live):
                     history_data
                 )
 
-            cursor.execute("DELETE FROM spread_history WHERE timestamp < datetime('now', '-30 days', '-1 hour')")
+            clean_query = f"DELETE FROM spread_history WHERE timestamp < datetime('now', '-{HISTORY_RETENTION_DAYS} days')"
+            cursor.execute(clean_query)
             conn.commit()
 
             elapsed_time = time.time() - SCRIPT_START_TIME
@@ -253,55 +314,31 @@ def update_history_and_get_stats(df_live):
                 for col in ['min_24h', 'max_24h', 'min_30d', 'max_30d']:
                     df_live[col] = df_live['spread']
                 return df_live
-
             else:
-                # 🔥 ЧИТАЄМО ВСЕ. І плюси, і мінуси.
-                stats_query = """
+                stats_query_full = """
                 SELECT 
                     token, 
                     route,
-                    MIN(spread_pct) as db_min_24h,
-                    MAX(spread_pct) as db_max_24h,
-                    MIN(spread_pct) as db_min_30d,
+                    MIN(CASE WHEN timestamp >= datetime('now', '-24 hours') THEN spread_pct END) as db_min_24h,
+                    MAX(CASE WHEN timestamp >= datetime('now', '-24 hours') THEN spread_pct END) as db_max_24h,
+                    MIN(spread_pct) as db_min_30d, 
                     MAX(spread_pct) as db_max_30d
                 FROM spread_history
-                WHERE timestamp >= datetime('now', '-24 hours')
                 GROUP BY token, route
                 """
-                df_stats = pd.read_sql_query(stats_query, conn)
+
+                df_stats = pd.read_sql_query(stats_query_full, conn)
 
                 if not df_stats.empty:
                     df_final = pd.merge(df_live, df_stats, on=['token', 'route'], how='left')
 
-                    df_final['min_24h'] = df_final['db_min_24h'].fillna(df_final['spread'])
-                    df_final['max_24h'] = df_final['db_max_24h'].fillna(df_final['spread'])
-                    df_final['min_30d'] = df_final['db_min_30d'].fillna(df_final['spread'])
-                    df_final['max_30d'] = df_final['db_max_30d'].fillna(df_final['spread'])
+                    for col in ['db_min_24h', 'db_max_24h', 'db_min_30d', 'db_max_30d']:
+                        df_final[col] = df_final[col].fillna(df_final['spread'])
 
-                    # 🔥 ОНОВЛЕННЯ LIVE (МАТЕМАТИЧНЕ)
-                    # Тут працює звичайна математика:
-                    # - Якщо spread = -5, а min_24h = -2 -> Оновиться на -5 (бо воно менше).
-                    # - Якщо spread = -1, а max_24h = -3 -> Оновиться на -1 (бо воно більше, тобто ближче до 0).
-                    # - Якщо spread = +1, а max_24h = -1 -> Оновиться на +1 (бо + більше за -).
-
-                    def force_update_min(row, col_min):
-                        current = row['spread']
-                        history_min = row[col_min]
-                        if current < history_min:  # Проста перевірка "що менше"
-                            return current
-                        return history_min
-
-                    def force_update_max(row, col_max):
-                        current = row['spread']
-                        history_max = row[col_max]
-                        if current > history_max:  # Проста перевірка "що більше"
-                            return current
-                        return history_max
-
-                    df_final['min_24h'] = df_final.apply(lambda x: force_update_min(x, 'min_24h'), axis=1)
-                    df_final['max_24h'] = df_final.apply(lambda x: force_update_max(x, 'max_24h'), axis=1)
-                    df_final['min_30d'] = df_final.apply(lambda x: force_update_min(x, 'min_30d'), axis=1)
-                    df_final['max_30d'] = df_final.apply(lambda x: force_update_max(x, 'max_30d'), axis=1)
+                    df_final['min_24h'] = df_final[['spread', 'db_min_24h']].min(axis=1)
+                    df_final['max_24h'] = df_final[['spread', 'db_max_24h']].max(axis=1)
+                    df_final['min_30d'] = df_final[['spread', 'db_min_30d']].min(axis=1)
+                    df_final['max_30d'] = df_final[['spread', 'db_max_30d']].max(axis=1)
 
                     return df_final
                 else:
@@ -314,10 +351,6 @@ def update_history_and_get_stats(df_live):
         return df_live
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 🔄 ОНОВЛЕННЯ БД
-# ═══════════════════════════════════════════════════════════════════════════
-
 def update_dashboard_db(df_final):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -327,14 +360,14 @@ def update_dashboard_db(df_final):
             cursor.execute("BEGIN TRANSACTION")
 
             if not df_final.empty:
-                # 🔥 ОКРУГЛЕННЯ ДО 4 ЗНАКІВ
                 cols_to_round = [
                     'buy_price', 'sell_price', 'spread',
-                    'min_24h', 'max_24h', 'min_30d', 'max_30d', 'net_funding'
+                    'min_24h', 'max_24h', 'min_30d', 'max_30d',
+                    'buy_funding_rate', 'sell_funding_rate'
                 ]
                 for col in cols_to_round:
                     if col in df_final.columns:
-                        df_final[col] = df_final[col].round(4)
+                        df_final[col] = df_final[col].round(5)
 
                 data_to_insert = []
                 for _, row in df_final.iterrows():
@@ -342,7 +375,8 @@ def update_dashboard_db(df_final):
                         row['token'], row['route'], row['buy_exchange'], row['sell_exchange'],
                         row['buy_price'], row['sell_price'], row['spread'],
                         row['min_24h'], row['max_24h'], row['min_30d'], row['max_30d'],
-                        row['net_funding'], row['funding_freq_str'],
+                        row['buy_funding_rate'], row['buy_funding_freq'],
+                        row['sell_funding_rate'], row['sell_funding_freq'],
                         row['oi_long'], row['oi_short'], row['vol_long'], row['vol_short'],
                         timestamp
                     ))
@@ -351,9 +385,9 @@ def update_dashboard_db(df_final):
                     INSERT INTO live_opportunities 
                     (token, route, buy_exchange, sell_exchange, buy_price, sell_price, 
                     spread_pct, spread_min_24h, spread_max_24h, spread_min_30d, spread_max_30d,
-                    net_funding_pct, funding_freq, 
+                    buy_funding_rate, buy_funding_freq, sell_funding_rate, sell_funding_freq,
                     oi_long_usd, oi_short_usd, vol_long_usd, vol_short_usd, last_updated)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 
                     ON CONFLICT(token, buy_exchange, sell_exchange) DO UPDATE SET
                         route = excluded.route,
@@ -364,7 +398,10 @@ def update_dashboard_db(df_final):
                         spread_max_24h = excluded.spread_max_24h,
                         spread_min_30d = excluded.spread_min_30d,
                         spread_max_30d = excluded.spread_max_30d,
-                        net_funding_pct = excluded.net_funding_pct,
+                        buy_funding_rate = excluded.buy_funding_rate,
+                        buy_funding_freq = excluded.buy_funding_freq,
+                        sell_funding_rate = excluded.sell_funding_rate,
+                        sell_funding_freq = excluded.sell_funding_freq,
                         oi_long_usd = excluded.oi_long_usd,
                         oi_short_usd = excluded.oi_short_usd,
                         vol_long_usd = excluded.vol_long_usd,
@@ -374,9 +411,7 @@ def update_dashboard_db(df_final):
                 cursor.executemany(sql_upsert, data_to_insert)
 
             cursor.execute("DELETE FROM live_opportunities WHERE last_updated < datetime('now', '-1 hour')")
-
             conn.commit()
-            cursor.execute("PRAGMA wal_checkpoint(PASSIVE);")
 
     except Exception as e:
         print(f"{C.RED}❌ Write Error: {e}{C.END}")
@@ -387,8 +422,9 @@ def update_dashboard_db(df_final):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main():
-    print(f"\n{C.CYAN}🚀 ARBITRAGE AGGREGATOR (FULL RANGE STATS){C.END}")
-    print(f"{C.YELLOW}Min/Max now includes NEGATIVE spreads.{C.END}")
+    print(f"\n{C.CYAN}🚀 ARBITRAGE AGGREGATOR{C.END}")
+    print(f"{C.YELLOW}Feature: New tokens bypass filters for {NEW_TOKEN_GRACE_PERIOD_HOURS}h.{C.END}")
+    print(f"{C.YELLOW}Fix: Paradex funding taken AS-IS. Variational multiplied by freq.{C.END}")
 
     init_target_db()
 
@@ -408,7 +444,10 @@ def main():
 
         full_market_data = pd.concat(dfs, ignore_index=True)
 
-        df_live = calculate_live_routes(full_market_data)
+        current_tokens_list = full_market_data['token'].unique().tolist()
+        discovery_map = manage_new_tokens(current_tokens_list)
+
+        df_live = calculate_live_routes(full_market_data, discovery_map)
         df_final = update_history_and_get_stats(df_live)
 
         if not df_final.empty:

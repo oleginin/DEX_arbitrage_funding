@@ -2,6 +2,7 @@ import multiprocessing
 import time
 import sys
 import os
+import subprocess
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ⚙️ НАЛАШТУВАННЯ ШЛЯХІВ
@@ -9,23 +10,36 @@ import os
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 MONITORS_DIR = os.path.join(CURRENT_DIR, 'Dex_monitor')
+SCRIPTS_DIR = os.path.join(CURRENT_DIR, 'Scripts')  # <--- Додали шлях до Scripts
 
+# Додаємо шляхи, щоб Python бачив файли в цих папках
 if MONITORS_DIR not in sys.path:
     sys.path.append(MONITORS_DIR)
+if SCRIPTS_DIR not in sys.path:
+    sys.path.append(SCRIPTS_DIR)
+if CURRENT_DIR not in sys.path:
+    sys.path.append(CURRENT_DIR)
 
 try:
+    # --- Імпорт Моніторів ---
     import backpack_monitor
     import paradex_monitor
     import variational_monitor
     import extended_monitor
     import lighter_monitor
+
+    # --- Імпорт Агрегатора ---
+    # Тепер Python знайде його, бо ми додали SCRIPTS_DIR у sys.path
+    import agregator
+
 except ImportError as e:
-    print(f"❌ Error importing monitors: {e}")
+    print(f"❌ Error importing modules: {e}")
+    print(f"🔍 Checked paths: {sys.path}")
     sys.exit(1)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 🚀 ГОЛОВНИЙ КЛАС
+# 🚀 ДОДАТКОВІ ФУНКЦІЇ ЗАПУСКУ
 # ═══════════════════════════════════════════════════════════════════════════
 
 class C:
@@ -38,7 +52,7 @@ class C:
 
 
 def run_monitor(target_func, name):
-    """Обгортка для запуску процесу."""
+    """Обгортка для запуску звичайних Python функцій (Монітори, Агрегатор)."""
     try:
         target_func()
     except KeyboardInterrupt:
@@ -47,62 +61,113 @@ def run_monitor(target_func, name):
         print(f"{C.RED}❌ Process {name} crashed: {e}{C.END}")
 
 
-if __name__ == "__main__":
-    # Для Windows це важливо, щоб уникнути рекурсивного запуску
-    multiprocessing.freeze_support()
+def run_dashboard_process():
+    """Обгортка для запуску Streamlit Dashboard."""
+    # Припускаємо, що dashboard.py лежить в КОРЕНІ (там де main.py)
+    dashboard_path = os.path.join(CURRENT_DIR, 'dashboard.py')
 
-    print(f"\n{C.BOLD}{C.CYAN}🚀 LAUNCHING ALL EXCHANGE MONITORS (SYNC MODE)...{C.END}")
+    if not os.path.exists(dashboard_path):
+        print(f"{C.RED}❌ Dashboard file not found at: {dashboard_path}{C.END}")
+        return
 
-    monitors_config = [
-        {"func": backpack_monitor.main, "name": "Backpack", "last_restart": 0},
-        {"func": paradex_monitor.main, "name": "Paradex", "last_restart": 0},
-        {"func": variational_monitor.main, "name": "Variational", "last_restart": 0},
-        {"func": extended_monitor.main, "name": "Extended", "last_restart": 0},
-        {"func": lighter_monitor.main, "name": "Lighter (WSS)", "last_restart": 0}
+    # Команда: python -m streamlit run dashboard.py
+    cmd = [
+        sys.executable, "-m", "streamlit", "run", dashboard_path,
+        "--server.port", "8501",
+        "--server.headless", "true",
+        "--server.address", "0.0.0.0",
+        "--theme.base", "dark"  # Можна задати темну тему примусово
     ]
 
-    processes = [None] * len(monitors_config)
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"{C.RED}❌ Dashboard crashed with exit code {e.returncode}{C.END}")
+    except KeyboardInterrupt:
+        pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 🏁 MAIN ENTRY POINT
+# ═══════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    # Важливо для Windows
+    multiprocessing.freeze_support()
+
+    print(f"\n{C.BOLD}{C.CYAN}🚀 LAUNCHING RIDDLE ARBITRAGE SYSTEM...{C.END}")
+
+    # Список процесів
+    processes_config = [
+        # --- МОНІТОРИ (в Dex_monitor) ---
+        {"func": backpack_monitor.main, "name": "Backpack", "is_streamlit": False, "last_restart": 0},
+        {"func": paradex_monitor.main, "name": "Paradex", "is_streamlit": False, "last_restart": 0},
+        {"func": variational_monitor.main, "name": "Variational", "is_streamlit": False, "last_restart": 0},
+        {"func": extended_monitor.main, "name": "Extended", "is_streamlit": False, "last_restart": 0},
+        {"func": lighter_monitor.main, "name": "Lighter (WSS)", "is_streamlit": False, "last_restart": 0},
+
+        # --- АГРЕГАТОР (в Scripts) ---
+        {"func": agregator.main, "name": "agregator", "is_streamlit": False, "last_restart": 0},
+
+        # --- DASHBOARD (в корені) ---
+        {"func": run_dashboard_process, "name": "Dashboard UI", "is_streamlit": True, "last_restart": 0}
+    ]
+
+    active_processes = [None] * len(processes_config)
+
 
     def start_process(index):
-        cfg = monitors_config[index]
-        p = multiprocessing.Process(target=run_monitor, args=(cfg["func"], cfg["name"]))
+        cfg = processes_config[index]
+
+        if cfg["is_streamlit"]:
+            p = multiprocessing.Process(target=cfg["func"], name=cfg["name"])
+        else:
+            p = multiprocessing.Process(target=run_monitor, args=(cfg["func"], cfg["name"]), name=cfg["name"])
+
         p.start()
-        processes[index] = p
-        print(f"{C.GREEN}✅ Started: {cfg['name']} (PID: {p.pid}){C.END}")
+        active_processes[index] = p
+
+        # Іконки для краси
+        if "agregator" in cfg["name"]:
+            icon = "🧠"
+        elif "Dashboard" in cfg["name"]:
+            icon = "📊"
+        else:
+            icon = "📡"
+
+        print(f"{C.GREEN}✅ Started: {icon} {cfg['name']} (PID: {p.pid}){C.END}")
         return p
 
-    # 🔥 ЗАПУСК: Запускаємо все максимально швидко, без затримок
-    # Монітори самі "сплять" всередині завдяки wait_for_next_cycle()
-    for i in range(len(monitors_config)):
-        start_process(i)
-        # time.sleep(0.5) <--- ПРИБРАЛИ, щоб всі встигли на найближчий цикл
 
-    print(f"\n{C.YELLOW}⚡ All systems active. Waiting for sync cycle (:00, :15, :30, :45)...{C.END}")
+    # 🔥 ЗАПУСК ВСІХ ПРОЦЕСІВ
+    for i in range(len(processes_config)):
+        start_process(i)
+
+    print(f"\n{C.YELLOW}⚡ System operational.{C.END}")
+    print(f"{C.YELLOW}📊 Dashboard: http://localhost:8501{C.END}")
     print(f"{C.YELLOW}🛑 Press Ctrl+C to stop.{C.END}\n")
 
     try:
         while True:
-            # Перевіряємо статус процесів кожні 5 секунд
             time.sleep(5)
 
-            for i, p in enumerate(processes):
+            for i, p in enumerate(active_processes):
                 if not p.is_alive():
-                    cfg = monitors_config[i]
+                    cfg = processes_config[i]
                     name = cfg["name"]
 
-                    # Захист від циклічного перезапуску (Backoff)
                     current_time = time.time()
                     if current_time - cfg["last_restart"] < 10:
-                        print(f"{C.RED}⚠️ {name} keeps crashing. Waiting 5s before restart...{C.END}")
+                        print(f"{C.RED}⚠️ {name} keeps crashing. Waiting 5s...{C.END}")
                         time.sleep(5)
 
                     print(f"{C.YELLOW}🔄 Restarting {name}...{C.END}")
-                    monitors_config[i]["last_restart"] = time.time()
+                    processes_config[i]["last_restart"] = time.time()
                     start_process(i)
 
     except KeyboardInterrupt:
-        print(f"\n{C.RED}🛑 STOPPING ALL MONITORS...{C.END}")
-        for p in processes:
+        print(f"\n{C.RED}🛑 SHUTTING DOWN...{C.END}")
+        for p in active_processes:
             if p and p.is_alive():
                 p.terminate()
                 p.join()
