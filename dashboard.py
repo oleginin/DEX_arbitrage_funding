@@ -5,152 +5,113 @@ import pandas as pd
 import time
 import os
 
-# ═══════════════════════════════════════════════════════════════════════════
-# ⚙️ НАЛАШТУВАННЯ
-# ═══════════════════════════════════════════════════════════════════════════
-
 REFRESH_SECONDS = 15
 
-st.set_page_config(
-    page_title="Arbitrage Scanner",
-    page_icon="🚀",
-    layout="wide",
-)
-
+st.set_page_config(page_title="Arbitrage Scanner", page_icon="🚀", layout="wide")
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Database', 'arbitrage_dashboard.db')
 
 
 def load_data():
-    if not os.path.exists(DB_PATH):
-        return pd.DataFrame()
+    if not os.path.exists(DB_PATH): return pd.DataFrame()
     try:
         conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-        query = "SELECT * FROM live_opportunities"
-        df = pd.read_sql_query(query, conn)
+        df = pd.read_sql_query("SELECT * FROM live_opportunities", conn)
         conn.close()
         return df
-    except Exception:
+    except:
         return pd.DataFrame()
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 🚀 ОСНОВНИЙ ДАШБОРД
-# ═══════════════════════════════════════════════════════════════════════════
-
-# Генерація посилань
 def get_trade_url(exchange, token):
-    ex = exchange.lower().strip()
-    token = token.upper().strip()
-
+    ex, t = exchange.lower().strip(), token.upper().strip()
     if 'lighter' in ex:
-        return f"https://app.Lighter.xyz/trade/{token}/?referral=118787PQ"
+        return f"https://app.Lighter.xyz/trade/{t}/?referral=118787PQ"
     elif 'paradex' in ex:
-        return f"https://app.Paradex.trade/trade/{token}-USD-PERP"
+        return f"https://app.Paradex.trade/trade/{t}-USD-PERP"
     elif 'variational' in ex or 'omni' in ex:
-        return f"https://omni.Variational.io/perpetual/{token}"
+        return f"https://omni.Variational.io/perpetual/{t}"
     elif 'backpack' in ex:
-        return f"https://Backpack.exchange/trade/{token}_USD_PERP"
+        return f"https://Backpack.exchange/trade/{t}_USD_PERP"
     elif 'extended' in ex:
-        return f"https://app.Extended.exchange/perp/{token}-USD"
-    else:
-        return f"https://www.google.com/search?q={exchange.capitalize()}+{token}+perp"
+        return f"https://app.Extended.exchange/perp/{t}-USD"
+    return f"https://www.google.com/search?q={exchange.capitalize()}+{t}+perp"
 
 
 st.title("🚀 Live Arbitrage Dashboard")
-
 df = load_data()
 
 with st.container(border=True):
-    st.markdown("### 🛠 Налаштування")
-
     col1, col2, col3, col4 = st.columns([1, 2, 2, 1])
-
-    with col1:
-        min_spread = st.number_input(
-            "📉 Мін. спред (%)",
-            min_value=-100.0,
-            value=-100.0,
-            step=0.1
-        )
-
-    with col2:
-        all_tokens = sorted(df['token'].unique()) if not df.empty else []
-        search_token = st.multiselect("Coin", all_tokens, placeholder="Всі")
-
-    with col3:
-        all_exchanges = sorted(
-            set(df['buy_exchange'].unique()) | set(df['sell_exchange'].unique())) if not df.empty else []
-        selected_exchanges = st.multiselect("Exchanges", all_exchanges, placeholder="Всі")
-
+    with col1: min_spread = st.number_input("📉 Мін. спред (%)", value=-100.0, step=0.1)
+    with col2: search_token = st.multiselect("Coin", sorted(df['token'].unique()) if not df.empty else [],
+                                             placeholder="Всі")
+    with col3: selected_exchanges = st.multiselect("Exchanges", sorted(
+        set(df['buy_exchange'].unique()) | set(df['sell_exchange'].unique())) if not df.empty else [],
+                                                   placeholder="Всі")
     with col4:
         st.markdown("<br>", unsafe_allow_html=True)
         auto_refresh = st.toggle("🔄 Авто-оновлення", value=True)
         timer_placeholder = st.empty()
-        if st.button("Оновити"):
-            st.rerun()
+        if st.button("Оновити"): st.rerun()
 
 if not df.empty:
     df_filtered = df[df['spread_pct'] >= min_spread].copy()
 
+    # Фільтр по токенам
     if search_token:
         df_filtered = df_filtered[df_filtered['token'].isin(search_token)]
 
+    # 🔥 ВИПРАВЛЕНИЙ: Розумний фільтр бірж
     if selected_exchanges:
-        mask = df_filtered['buy_exchange'].isin(selected_exchanges) | df_filtered['sell_exchange'].isin(
-            selected_exchanges)
+        if len(selected_exchanges) == 1:
+            # Режим 1 біржі: Показуємо всі зв'язки з нею (АБО)
+            mask = df_filtered['buy_exchange'].isin(selected_exchanges) | df_filtered['sell_exchange'].isin(
+                selected_exchanges)
+        else:
+            # Режим 2+ бірж: Показуємо маршрути ТІЛЬКИ між ними (І)
+            mask = df_filtered['buy_exchange'].isin(selected_exchanges) & df_filtered['sell_exchange'].isin(
+                selected_exchanges)
+
         df_filtered = df_filtered[mask]
 
-    df_filtered = df_filtered.sort_values(by='spread_pct', ascending=False)
+    buy_hourly = df_filtered['buy_funding_rate'] / df_filtered['buy_funding_freq']
+    sell_hourly = df_filtered['sell_funding_rate'] / df_filtered['sell_funding_freq']
+    net_hourly = sell_hourly - buy_hourly
+    df_filtered['funding_apr'] = net_hourly * 24 * 365
+    df_filtered['f_spread_8h'] = net_hourly * 8
 
-    # Генеруємо посилання
-    df_filtered['buy_link'] = df_filtered.apply(lambda row: get_trade_url(row['buy_exchange'], row['token']), axis=1)
-    df_filtered['sell_link'] = df_filtered.apply(lambda row: get_trade_url(row['sell_exchange'], row['token']), axis=1)
+    df_filtered = df_filtered.sort_values(by='spread_pct', ascending=False)
+    df_filtered['buy_link'] = df_filtered.apply(lambda r: get_trade_url(r['buy_exchange'], r['token']), axis=1)
+    df_filtered['sell_link'] = df_filtered.apply(lambda r: get_trade_url(r['sell_exchange'], r['token']), axis=1)
 
     m1, m2, m3 = st.columns(3)
     m1.metric("Маршрутів", len(df_filtered))
     if not df_filtered.empty:
-        best_spread = df_filtered.iloc[0]['spread_pct']
-        best_pair = f"{df_filtered.iloc[0]['token']} ({df_filtered.iloc[0]['route']})"
-        m2.metric("Топ спред", f"{best_spread:.2f}%")
-        m3.metric("Топ пара", best_pair)
+        m2.metric("Топ спред", f"{df_filtered.iloc[0]['spread_pct']:.2f}%")
+        m3.metric("Топ пара", f"{df_filtered.iloc[0]['token']} ({df_filtered.iloc[0]['route']})")
 
-    # --- НАЛАШТУВАННЯ КОЛОНОК (ОНОВЛЕНО) ---
     display_cols = [
-        'token',
-        'buy_link', 'sell_link',
-        'spread_pct',
-        # 🔥 Нові колонки фандінгу
-        'buy_funding_rate', 'buy_funding_freq',
-        'sell_funding_rate', 'sell_funding_freq',
-        'spread_min_24h', 'spread_max_24h',
-        'buy_price', 'sell_price'
+        'token', 'buy_link', 'sell_link', 'spread_pct',
+        'funding_apr', 'f_spread_8h',
+        'buy_funding_rate', 'buy_funding_freq', 'buy_funding_24h_pct',
+        'sell_funding_rate', 'sell_funding_freq', 'sell_funding_24h_pct',
+        'spread_min_24h', 'spread_max_24h', 'buy_price', 'sell_price'
     ]
 
-    clean_name_regex = r"https?://(?:www\.|app\.|omni\.)?(\w+)"
-
-    column_config = {
+    clean_regex = r"https?://(?:www\.|app\.|omni\.)?(\w+)"
+    config = {
         "token": st.column_config.TextColumn("Token", width="small"),
-
-        "buy_link": st.column_config.LinkColumn(
-            "Buy Route",
-            display_text=clean_name_regex,
-            width="medium"
-        ),
-
-        "sell_link": st.column_config.LinkColumn(
-            "Sell Route",
-            display_text=clean_name_regex,
-            width="medium"
-        ),
-
+        "buy_link": st.column_config.LinkColumn("Buy Route", display_text=clean_regex, width="medium"),
+        "sell_link": st.column_config.LinkColumn("Sell Route", display_text=clean_regex, width="medium"),
         "spread_pct": st.column_config.NumberColumn("Spread", format="%.2f %%"),
-
-        # 🔥 Налаштування відображення нових колонок
+        "funding_apr": st.column_config.NumberColumn("Fund APR", format="%.2f %%"),
+        "f_spread_8h": st.column_config.NumberColumn("F_spread 8h", format="%.4f %%"),
         "buy_funding_rate": st.column_config.NumberColumn("Buy Fund", format="%.4f %%"),
         "buy_funding_freq": st.column_config.NumberColumn("Buy Freq (h)"),
+        "buy_funding_24h_pct": st.column_config.NumberColumn("F buy 24h", format="%.4f %%"),
         "sell_funding_rate": st.column_config.NumberColumn("Sell Fund", format="%.4f %%"),
         "sell_funding_freq": st.column_config.NumberColumn("Sell Freq (h)"),
-
+        "sell_funding_24h_pct": st.column_config.NumberColumn("F sell 24h", format="%.4f %%"),
         "spread_min_24h": st.column_config.NumberColumn("Min 24h", format="%.2f %%"),
         "spread_max_24h": st.column_config.NumberColumn("Max 24h", format="%.2f %%"),
         "buy_price": st.column_config.NumberColumn("Buy Price", format="%.4f"),
@@ -158,22 +119,12 @@ if not df.empty:
     }
 
 
-    def highlight_spread(val):
-        if val > 0.5:
-            return 'background-color: #d4edda; color: black;'
-        elif val > 0:
-            return 'background-color: #fff3cd; color: black;'
-        else:
-            return 'background-color: #f8d7da; color: black;'
+    def hl(v):
+        return 'background-color: #d4edda; color: black;' if v > 0.5 else 'background-color: #fff3cd; color: black;' if v > 0 else 'background-color: #f8d7da; color: black;'
 
 
-    st.dataframe(
-        df_filtered[display_cols].style.map(highlight_spread, subset=['spread_pct']),
-        width="stretch",
-        height=800,
-        column_config=column_config,
-        hide_index=True
-    )
+    st.dataframe(df_filtered[display_cols].style.map(hl, subset=['spread_pct']), width="stretch", height=800,
+                 column_config=config, hide_index=True)
 
 else:
     st.info("⏳ Очікування даних...")

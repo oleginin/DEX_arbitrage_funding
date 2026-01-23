@@ -30,7 +30,7 @@ data_lock = threading.Lock()
 # Час останнього повного очищення (для профілактики)
 last_flush_time = time.time()
 FLUSH_INTERVAL = 1800  # Кожні 30 хвилин скидаємо кеш стаканів
-
+interval = 15
 
 class C:
     CYAN = '\033[96m'
@@ -45,9 +45,9 @@ class C:
 # 🕒 СИНХРОНІЗАЦІЯ
 # ═══════════════════════════════════════════════════════════════════════════
 
-def wait_for_next_cycle(interval=15):
+def wait_for_next_cycle(sleep_time):
     now = time.time()
-    next_ts = (int(now) // interval + 1) * interval
+    next_ts = (int(now) // sleep_time + 1) * sleep_time
     sleep_time = next_ts - now
     if sleep_time > 0:
         time.sleep(sleep_time)
@@ -91,7 +91,7 @@ def update_db_loop():
     time.sleep(2)
 
     while True:
-        wait_for_next_cycle(15)
+        wait_for_next_cycle(interval)
 
         # Профілактичне очищення кешу раз на 30 хв (щоб прибрати "сміття")
         if time.time() - last_flush_time > FLUSH_INTERVAL:

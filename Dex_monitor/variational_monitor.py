@@ -26,7 +26,6 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 }
 
-
 class C:
     CYAN = '\033[96m'
     GREEN = '\033[92m'
@@ -35,14 +34,8 @@ class C:
     BOLD = '\033[1m'
     END = '\033[0m'
 
-
-pd.set_option('display.max_rows', None)
-pd.set_option('display.width', 250)
-pd.set_option('display.float_format', '{:,.4f}'.format)
-
-
 # ═══════════════════════════════════════════════════════════════════════════
-# 🕒 ФУНКЦІЯ СИНХРОНІЗАЦІЇ (НОВЕ)
+# 🕒 ФУНКЦІЯ СИНХРОНІЗАЦІЇ
 # ═══════════════════════════════════════════════════════════════════════════
 
 def wait_for_next_cycle(interval=15):
@@ -56,17 +49,14 @@ def wait_for_next_cycle(interval=15):
     if sleep_time > 0:
         time.sleep(sleep_time)
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 🗄️ БАЗА ДАНИХ
 # ═══════════════════════════════════════════════════════════════════════════
 
 def init_db():
     if not os.path.exists(DB_FOLDER):
-        try:
-            os.makedirs(DB_FOLDER)
-        except:
-            pass
+        try: os.makedirs(DB_FOLDER)
+        except: pass
 
     conn = sqlite3.connect(DB_PATH)
     conn.execute('PRAGMA journal_mode=WAL;')
@@ -88,7 +78,6 @@ def init_db():
     conn.commit()
     conn.close()
     print(f"{C.GREEN}✅ DB Connected: {DB_PATH}{C.END}")
-
 
 def save_to_db(data_list, is_full_update):
     conn = sqlite3.connect(DB_PATH)
@@ -132,7 +121,6 @@ def save_to_db(data_list, is_full_update):
     finally:
         conn.close()
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 📡 API ФУНКЦІЇ
 # ═══════════════════════════════════════════════════════════════════════════
@@ -143,11 +131,9 @@ def get_json(url, retries=3):
             response = requests.get(url, headers=HEADERS, timeout=20)
             if response.status_code != 200:
                 print(f"{C.RED}⚠️ API Status: {response.status_code}{C.END}")
-
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            print(f"{C.RED}❌ Req Error: {e}{C.END}")
             if i == retries - 1: return None
             time.sleep(2)
     return None
@@ -184,9 +170,9 @@ def fetch_variational_data():
             if bid > 0:
                 spread = ((ask - bid) / bid) * 100
 
-            # 3. Funding Rate (BPS -> %)
-            funding_bps = float(item.get('funding_rate', 0))
-            funding_pct = funding_bps / 100.0
+            # 3. Funding Rate (API дає РІЧНУ ставку. Переводимо в ПОГОДИННУ у %)
+            raw_annual_funding = float(item.get('funding_rate', 0))
+            hourly_funding_pct = (raw_annual_funding / 8760.0) * 100.0
 
             # 4. Frequency
             interval_s = int(item.get('funding_interval_s', 3600))
@@ -206,7 +192,7 @@ def fetch_variational_data():
                 'Bid': bid,
                 'Ask': ask,
                 'Spread %': spread,
-                'Funding %': funding_pct,
+                'Funding %': hourly_funding_pct,
                 'Freq (h)': freq_hours,
                 'OI ($)': oi_usd,
                 'Volume 24h ($)': vol_usd
@@ -216,7 +202,6 @@ def fetch_variational_data():
             continue
 
     return results
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 🚀 MAIN LOOP
@@ -232,24 +217,18 @@ def main():
     first_run = True
 
     while True:
-        # 🔥 1. СИНХРОНІЗАЦІЯ: Чекаємо старту циклу
         wait_for_next_cycle(UPDATE_INTERVAL_FAST)
 
         try:
             current_time = time.time()
             is_full_update = (current_time - last_slow_update) >= UPDATE_INTERVAL_SLOW
 
-            if first_run:
-                print(f"{C.BOLD}🔄 Fetching Data...{C.END}")
-
-            # 🔥 2. ОТРИМАННЯ ДАНИХ (Синхронно)
             data_list = fetch_variational_data()
 
             if not data_list:
                 print(f"{C.RED}⚠️ No data. Retrying next cycle...{C.END}")
                 continue
 
-            # 🔥 3. ЗБЕРЕЖЕННЯ
             save_to_db(data_list, is_full_update)
 
             if is_full_update:
@@ -261,9 +240,7 @@ def main():
                 print(f"{C.GREEN}✅ Monitor Active. Pairs: {len(data_list)}{C.END}\n")
                 first_run = False
             else:
-                print(f"{C.CYAN}[{ts}] Variational: оновив {len(data_list)} токенів.{C.END}")
-
-            # time.sleep більше не потрібен
+                print(f"{C.CYAN}[{ts}] Variational: оновив {len(data_list)} токенів.{C.END}", end="\r")
 
         except KeyboardInterrupt:
             print(f"\n{C.RED}🛑 Stopped{C.END}")
@@ -271,7 +248,6 @@ def main():
         except Exception as e:
             print(f"\n{C.RED}❌ Error: {e}{C.END}")
             time.sleep(5)
-
 
 if __name__ == "__main__":
     main()
