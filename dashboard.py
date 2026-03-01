@@ -41,14 +41,15 @@ st.title("🚀 Live Arbitrage Dashboard")
 df = load_data()
 
 with st.container(border=True):
-    col1, col2, col3, col4 = st.columns([1, 2, 2, 1])
+    col1, col2, col3, col4, col5 = st.columns([1, 1, 2, 2, 1])
     with col1: min_spread = st.number_input("📉 Мін. спред (%)", value=-100.0, step=0.1)
-    with col2: search_token = st.multiselect("Coin", sorted(df['token'].unique()) if not df.empty else [],
+    with col2: hold_hours = st.number_input("⏱️ Години холду", value=8.0, step=1.0)
+    with col3: search_token = st.multiselect("Coin", sorted(df['token'].unique()) if not df.empty else [],
                                              placeholder="Всі")
-    with col3: selected_exchanges = st.multiselect("Exchanges", sorted(
+    with col4: selected_exchanges = st.multiselect("Exchanges", sorted(
         set(df['buy_exchange'].unique()) | set(df['sell_exchange'].unique())) if not df.empty else [],
                                                    placeholder="Всі")
-    with col4:
+    with col5:
         st.markdown("<br>", unsafe_allow_html=True)
         auto_refresh = st.toggle("🔄 Авто-оновлення", value=True)
         timer_placeholder = st.empty()
@@ -78,9 +79,10 @@ if not df.empty:
     sell_hourly = df_filtered['sell_funding_rate'] / df_filtered['sell_funding_freq']
     net_hourly = sell_hourly - buy_hourly
     df_filtered['funding_apr'] = net_hourly * 24 * 365
-    df_filtered['f_spread_8h'] = net_hourly * 8
+    df_filtered['f_spread_expected'] = net_hourly * hold_hours
+    df_filtered['total_expected_profit'] = df_filtered['spread_pct'] + df_filtered['f_spread_expected']
 
-    df_filtered = df_filtered.sort_values(by='spread_pct', ascending=False)
+    df_filtered = df_filtered.sort_values(by='total_expected_profit', ascending=False)
     df_filtered['buy_link'] = df_filtered.apply(lambda r: get_trade_url(r['buy_exchange'], r['token']), axis=1)
     df_filtered['sell_link'] = df_filtered.apply(lambda r: get_trade_url(r['sell_exchange'], r['token']), axis=1)
 
@@ -91,8 +93,8 @@ if not df.empty:
         m3.metric("Топ пара", f"{df_filtered.iloc[0]['token']} ({df_filtered.iloc[0]['route']})")
 
     display_cols = [
-        'token', 'buy_link', 'sell_link', 'spread_pct',
-        'funding_apr', 'f_spread_8h',
+        'token', 'buy_link', 'sell_link', 'total_expected_profit', 'spread_pct',
+        'funding_apr', 'f_spread_expected',
         'buy_funding_rate', 'buy_funding_freq', 'buy_funding_24h_pct',
         'sell_funding_rate', 'sell_funding_freq', 'sell_funding_24h_pct',
         'spread_min_24h', 'spread_max_24h', 'buy_price', 'sell_price'
@@ -103,9 +105,10 @@ if not df.empty:
         "token": st.column_config.TextColumn("Token", width="small"),
         "buy_link": st.column_config.LinkColumn("Buy Route", display_text=clean_regex, width="medium"),
         "sell_link": st.column_config.LinkColumn("Sell Route", display_text=clean_regex, width="medium"),
+        "total_expected_profit": st.column_config.NumberColumn("Total Expected", format="%.2f %%"),
         "spread_pct": st.column_config.NumberColumn("Spread", format="%.2f %%"),
         "funding_apr": st.column_config.NumberColumn("Fund APR", format="%.2f %%"),
-        "f_spread_8h": st.column_config.NumberColumn("F_spread 8h", format="%.4f %%"),
+        "f_spread_expected": st.column_config.NumberColumn(f"F_spread {int(hold_hours)}h", format="%.4f %%"),
         "buy_funding_rate": st.column_config.NumberColumn("Buy Fund", format="%.4f %%"),
         "buy_funding_freq": st.column_config.NumberColumn("Buy Freq (h)"),
         "buy_funding_24h_pct": st.column_config.NumberColumn("F buy 24h", format="%.4f %%"),
@@ -123,7 +126,7 @@ if not df.empty:
         return 'background-color: #d4edda; color: black;' if v > 0.5 else 'background-color: #fff3cd; color: black;' if v > 0 else 'background-color: #f8d7da; color: black;'
 
 
-    st.dataframe(df_filtered[display_cols].style.map(hl, subset=['spread_pct']), width="stretch", height=800,
+    st.dataframe(df_filtered[display_cols].style.map(hl, subset=['total_expected_profit']), width="stretch", height=800,
                  column_config=config, hide_index=True)
 
 else:
